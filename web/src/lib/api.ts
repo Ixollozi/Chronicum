@@ -202,14 +202,6 @@ export const client = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
-  tags: (status?: string) => {
-    const q = status ? `?status=${encodeURIComponent(status)}` : "";
-    return api<{ id: number; name: string; status: string }[]>(`/api/tags${q}`);
-  },
-  approveTag: (id: number) =>
-    api<{ id: number; name: string; status: string }>(`/api/tags/${id}/approve`, { method: "POST" }),
-  rejectTag: (id: number) =>
-    api<{ id: number; name: string; status: string }>(`/api/tags/${id}/reject`, { method: "POST" }),
   getSettings: () => api<AppSettings>("/api/settings"),
   patchSettings: (body: Partial<AppSettings>) =>
     api<AppSettings>("/api/settings", { method: "PATCH", body: JSON.stringify(body) }),

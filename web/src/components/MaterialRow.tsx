@@ -1,13 +1,32 @@
+import Link from "next/link";
 import type { MaterialListItem } from "@/lib/api";
 
-const STATUS_LABEL: Record<string, string> = {
-  queued: "в очереди",
+export const STATUS_LABEL: Record<string, string> = {
+  queued: "очередь",
   processing: "обработка",
   preview: "preview",
   awaiting_full: "ждёт full",
   done: "готово",
   failed: "ошибка",
 };
+
+export const SOURCE_LABEL: Record<string, string> = {
+  youtube: "YouTube",
+  instagram: "Instagram",
+  video: "Видео",
+  article: "Статья",
+  note: "Заметка",
+  pdf: "PDF",
+  voice: "Голос",
+  file: "Файл",
+};
+
+function statusDot(status: string): string {
+  if (status === "done") return "bg-[var(--accent)]";
+  if (status === "failed") return "bg-[var(--warn)]";
+  if (status === "processing" || status === "queued") return "bg-[var(--muted)] animate-pulse";
+  return "bg-[color-mix(in_srgb,var(--accent)_50%,var(--muted))]";
+}
 
 export function StatusPill({ status }: { status: string }) {
   const tone =
@@ -17,76 +36,139 @@ export function StatusPill({ status }: { status: string }) {
         ? "text-[var(--warn)]"
         : "text-[var(--muted)]";
   return (
-    <span className={`text-[11px] uppercase tracking-[0.16em] ${tone}`}>
+    <span className={`inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.14em] ${tone}`}>
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDot(status)}`} aria-hidden />
       {STATUS_LABEL[status] || status}
     </span>
   );
 }
 
+export function formatShortDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
+}
+
+export function cleanMetaPart(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const n = value.trim().toLowerCase();
+  if (!n || n === "none" || n === "n/a" || n === "null") return null;
+  return value.trim();
+}
+
+/** Compact row for archive split-view list */
 export function MaterialRow({
   item,
   index,
+  active,
   selectable,
   selected,
+  onSelect,
   onToggle,
+  forceChecks,
 }: {
   item: MaterialListItem;
   index: number;
+  active?: boolean;
   selectable?: boolean;
   selected?: boolean;
+  onSelect?: (id: string) => void;
   onToggle?: (id: string) => void;
+  forceChecks?: boolean;
 }) {
+  const score = item.usefulness_score;
+  const dateLabel = formatShortDate(item.created_at);
+  const source = SOURCE_LABEL[item.source_type] || item.source_type;
+  const category = cleanMetaPart(item.category);
+  const meta = [source, category, dateLabel].filter(Boolean) as string[];
+
   return (
     <div
-      className={`group grid items-baseline gap-x-4 gap-y-2 border-b border-[var(--line)] py-5 transition hover:bg-[var(--surface-hover)] animate-rise ${
-        selectable
-          ? "grid-cols-[auto_auto_1fr_auto] md:grid-cols-[auto_4rem_1fr_7rem_6rem]"
-          : "grid-cols-[auto_1fr_auto] md:grid-cols-[4rem_1fr_7rem_6rem]"
-      }`}
-      style={{ animationDelay: `${Math.min(index, 12) * 40}ms` }}
+      role="option"
+      aria-selected={active}
+      className={`lib-item group relative flex items-start gap-2.5 px-3 py-3 transition ${
+        active ? "lib-item-active" : ""
+      } ${selected ? "lib-item-checked" : ""}`}
+      onClick={() => onSelect?.(item.id)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect?.(item.id);
+        }
+      }}
+      tabIndex={0}
+      style={{ animationDelay: `${Math.min(index, 14) * 22}ms` }}
     >
       {selectable && (
-        <label className="flex items-center self-center">
+        <label
+          className="lib-item-check"
+          data-force={forceChecks || selected ? "true" : "false"}
+          onClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
           <input
             type="checkbox"
             checked={Boolean(selected)}
             onChange={() => onToggle?.(item.id)}
-            className="accent-[var(--accent)]"
+            className="peer sr-only"
             aria-label={`Выбрать ${item.title || item.id}`}
           />
+          <span className="lib-check peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--accent)]" data-checked={selected || undefined} aria-hidden />
         </label>
       )}
-      <span className="text-xs tabular-nums text-[var(--muted)]">
+
+      <span
+        className="w-6 shrink-0 select-none pt-0.5 text-[0.8rem] tabular-nums leading-none text-[color-mix(in_srgb,var(--muted)_55%,transparent)]"
+        style={{ fontFamily: "var(--font-display)" }}
+        aria-hidden
+      >
         {String(index + 1).padStart(2, "0")}
       </span>
-      <div className="min-w-0">
-        <a href={`/m/${item.id}`} className="block">
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start justify-between gap-3">
           <h2
-            className="truncate text-xl leading-snug tracking-[-0.02em] transition group-hover:text-[var(--accent)] md:text-[1.35rem]"
+            className={`line-clamp-2 text-[0.98rem] leading-snug tracking-[-0.015em] ${
+              active ? "text-[var(--ink)]" : "text-[color-mix(in_srgb,var(--ink)_92%,transparent)]"
+            }`}
             style={{ fontFamily: "var(--font-display)" }}
           >
             {item.title || "Без названия"}
           </h2>
-        </a>
-        <p className="mt-1 line-clamp-2 text-sm text-[var(--muted)]">
-          {item.summary || item.main_idea || "Ещё обрабатывается…"}
-        </p>
-        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[var(--muted)]">
-          <span>{item.source_type}</span>
-          {item.category && <span>{item.category}</span>}
-          {item.tags.slice(0, 3).map((t) => (
-            <span key={t}>#{t}</span>
-          ))}
+          <span
+            className={`shrink-0 tabular-nums text-sm leading-none ${
+              score != null ? "text-[var(--accent)]" : "text-[var(--muted)]"
+            }`}
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            {score != null ? score : "—"}
+          </span>
         </div>
+        <p className="mt-1 line-clamp-1 text-[0.8rem] text-[var(--muted)]">
+          {item.summary || item.main_idea || "Обрабатывается…"}
+        </p>
+        <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 text-[0.68rem] text-[color-mix(in_srgb,var(--muted)_88%,transparent)]">
+          <span
+            className={`mr-0.5 inline-block h-1.5 w-1.5 rounded-full ${statusDot(item.processing_status)}`}
+            aria-hidden
+          />
+          {meta.map((part, i) => (
+            <span key={`${part}-${i}`} className="inline-flex items-center gap-1.5">
+              {i > 0 && <span className="opacity-40">·</span>}
+              {part}
+            </span>
+          ))}
+        </p>
       </div>
-      <div className="hidden text-right md:block">
-        <StatusPill status={item.processing_status} />
-      </div>
-      <div className="text-right">
-        <span className="tabular-nums text-sm">
-          {item.usefulness_score != null ? `${item.usefulness_score}/10` : "—"}
-        </span>
-      </div>
+
+      {/* Mobile: open full card */}
+      <Link
+        href={`/m/${item.id}`}
+        className="absolute inset-0 z-[1] lg:hidden"
+        aria-label={`Открыть ${item.title || "материал"}`}
+        onClick={(e) => e.stopPropagation()}
+      />
     </div>
   );
 }

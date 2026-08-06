@@ -1,12 +1,39 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArchivePreview } from "@/components/ArchivePreview";
 import { MaterialRow } from "@/components/MaterialRow";
 import { client, type MaterialListItem } from "@/lib/api";
+
+const STATUSES = [
+  { value: "", label: "Все" },
+  { value: "done", label: "Готово" },
+  { value: "queued", label: "Очередь" },
+  { value: "processing", label: "В работе" },
+  { value: "awaiting_full", label: "Ждёт full" },
+  { value: "failed", label: "Ошибка" },
+] as const;
+
+function materialsLabel(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} материал`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} материала`;
+  return `${n} материалов`;
+}
+
+function cleanCategories(list: { id: number; name: string }[]) {
+  return list.filter((c) => {
+    const n = c.name.trim().toLowerCase();
+    return n && n !== "none" && n !== "n/a" && n !== "null";
+  });
+}
 
 export default function ArchivePage() {
   const [items, setItems] = useState<MaterialListItem[]>([]);
   const [total, setTotal] = useState(0);
+  const [draftQ, setDraftQ] = useState("");
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("");
   const [category, setCategory] = useState("");
@@ -14,7 +41,9 @@ export default function ArchivePage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(
     async (opts?: { silent?: boolean }) => {
@@ -33,6 +62,10 @@ export default function ArchivePage() {
           const ids = new Set(data.items.map((i) => i.id));
           return new Set([...prev].filter((id) => ids.has(id)));
         });
+        setActiveId((prev) => {
+          if (prev && data.items.some((i) => i.id === prev)) return prev;
+          return data.items[0]?.id ?? null;
+        });
       } catch (e) {
         setError(e instanceof Error ? e.message : "Ошибка загрузки");
       } finally {
@@ -44,8 +77,16 @@ export default function ArchivePage() {
 
   useEffect(() => {
     load();
-    client.categories().then(setCategories).catch(() => undefined);
+    client
+      .categories()
+      .then((c) => setCategories(cleanCategories(c)))
+      .catch(() => undefined);
   }, [load]);
+
+  useEffect(() => {
+    const t = setTimeout(() => setQ(draftQ.trim()), 320);
+    return () => clearTimeout(t);
+  }, [draftQ]);
 
   useEffect(() => {
     const busyItems = items.some((i) => ["queued", "processing"].includes(i.processing_status));
@@ -54,10 +95,23 @@ export default function ArchivePage() {
     return () => clearInterval(t);
   }, [items, load]);
 
+  const activeItem = useMemo(
+    () => items.find((i) => i.id === activeId) ?? null,
+    [items, activeId]
+  );
+
   const allSelected = useMemo(
     () => items.length > 0 && items.every((i) => selected.has(i.id)),
     [items, selected]
   );
+
+  const processingCount = useMemo(
+    () => items.filter((i) => ["queued", "processing"].includes(i.processing_status)).length,
+    [items]
+  );
+
+  const filtersActive = Boolean(q || status || category);
+  const forceChecks = selected.size > 0;
 
   function toggle(id: string) {
     setSelected((prev) => {
@@ -73,8 +127,54 @@ export default function ArchivePage() {
     else setSelected(new Set(items.map((i) => i.id)));
   }
 
-  async function deleteSelected() {
-    const ids = [...selected];
+  function clearFilters() {
+    setDraftQ("");
+    setQ("");
+    setStatus("");
+    setCategory("");
+  }
+
+  const itemsRef = useRef(items);
+  const activeRef = useRef(activeId);
+  itemsRef.current = items;
+  activeRef.current = activeId;
+
+  const moveActive = useCallback((delta: number) => {
+    const list = itemsRef.current;
+    if (!list.length) return;
+    const idx = list.findIndex((i) => i.id === activeRef.current);
+    const base = idx < 0 ? 0 : idx;
+    const next = Math.min(list.length - 1, Math.max(0, base + delta));
+    setActiveId(list[next].id);
+    const el = listRef.current?.querySelector(`[data-id="${list[next].id}"]`);
+    el?.scrollIntoView({ block: "nearest" });
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        moveActive(1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        moveActive(-1);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [moveActive]);
+
+  async function deleteIds(ids: string[]) {
     if (!ids.length) return;
     const ok = window.confirm(
       ids.length === 1
@@ -86,7 +186,11 @@ export default function ArchivePage() {
     setError(null);
     try {
       await client.deleteMaterials(ids);
-      setSelected(new Set());
+      setSelected((prev) => {
+        const next = new Set(prev);
+        ids.forEach((id) => next.delete(id));
+        return next;
+      });
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось удалить");
@@ -96,88 +200,224 @@ export default function ArchivePage() {
   }
 
   return (
-    <section>
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[var(--muted)]">{total} материалов</p>
-        {selected.size > 0 && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={deleteSelected}
-            className="border border-[var(--warn)] px-3 py-1.5 text-sm text-[var(--warn)] hover:bg-[var(--warn)] hover:text-[var(--btn-fg)] disabled:opacity-40"
+    <section className="animate-fade">
+      {/* Browser chrome */}
+      <div className="lib-chrome mb-4">
+        <div className="mb-3 px-1 md:px-0">
+          <p className="mb-1 text-[10px] uppercase tracking-[0.28em] text-[var(--muted)]">Chronicum</p>
+          <h1
+            className="text-[clamp(1.7rem,3vw,2.15rem)] leading-none tracking-[-0.03em]"
+            style={{ fontFamily: "var(--font-display)" }}
           >
-            {busy ? "…" : `Удалить выбранные (${selected.size})`}
-          </button>
-        )}
-      </div>
-      <form
-        className="mb-8 flex flex-col gap-3 sm:flex-row sm:flex-wrap"
-        onSubmit={(e) => {
-          e.preventDefault();
-          load();
-        }}
-      >
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Фильтр…"
-          className="min-w-[200px] border-b border-[var(--line)] bg-transparent py-2 outline-none focus:border-[var(--accent)]"
-        />
-        <select
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          className="border-b border-[var(--line)] bg-transparent py-2 outline-none"
-        >
-          <option value="">Все статусы</option>
-          <option value="done">готово</option>
-          <option value="queued">очередь</option>
-          <option value="processing">обработка</option>
-          <option value="awaiting_full">ждёт full</option>
-          <option value="failed">ошибка</option>
-        </select>
-        <select
-          value={category}
-          onChange={(e) => setCategory(e.target.value)}
-          className="border-b border-[var(--line)] bg-transparent py-2 outline-none"
-        >
-          <option value="">Все категории</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.name}>
-              {c.name}
-            </option>
-          ))}
-        </select>
-        <button type="submit" className="border border-[var(--line)] px-4 py-2 text-sm hover:border-[var(--accent)]">
-          Найти
-        </button>
-      </form>
+            Архив
+          </h1>
+        </div>
 
-      {error && <p className="mb-4 text-sm text-[var(--warn)]">{error}</p>}
-      {loading ? (
-        <p className="text-[var(--muted)]">Загружаю…</p>
-      ) : items.length === 0 ? (
-        <p className="text-[var(--muted)]">Пусто. Начни с главной строки.</p>
-      ) : (
-        <div>
-          <label className="mb-2 flex items-center gap-2 text-xs text-[var(--muted)]">
-            <input
-              type="checkbox"
-              checked={allSelected}
-              onChange={toggleAll}
-              className="accent-[var(--accent)]"
-            />
-            Выбрать все на странице
-          </label>
-          {items.map((item, i) => (
-            <MaterialRow
-              key={item.id}
-              item={item}
-              index={i}
-              selectable
-              selected={selected.has(item.id)}
-              onToggle={toggle}
-            />
-          ))}
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2.5">
+            <form
+              className="relative min-w-0 flex-1"
+              onSubmit={(e) => {
+                e.preventDefault();
+                setQ(draftQ.trim());
+              }}
+            >
+              <input
+                value={draftQ}
+                onChange={(e) => setDraftQ(e.target.value)}
+                placeholder="Найти по названию, идее, тегу…"
+                className="archive-search pr-24"
+                aria-label="Поиск в архиве"
+              />
+              {draftQ && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraftQ("");
+                    setQ("");
+                  }}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full px-2.5 py-1 text-xs text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--ink)]"
+                >
+                  очистить
+                </button>
+              )}
+            </form>
+            <Link href="/" className="archive-cta shrink-0">
+              + Добавить
+            </Link>
+          </div>
+
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <div className="archive-pill-scroller max-w-full">
+              {STATUSES.map((s) => (
+                <button
+                  key={s.value || "all"}
+                  type="button"
+                  className="archive-pill shrink-0"
+                  data-active={status === s.value}
+                  onClick={() => setStatus(s.value)}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="lib-select"
+              aria-label="Категория"
+            >
+              <option value="">Все категории</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.name}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+            {filtersActive && (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="rounded-full px-3 py-1.5 text-xs text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--accent)]"
+              >
+                Сбросить
+              </button>
+            )}
+            {processingCount > 0 && (
+              <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-[var(--accent-soft)] px-2.5 py-1 text-xs text-[var(--accent)]">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--accent)]" />
+                {processingCount} в работе
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <p className="mb-3 rounded-[var(--radius-md)] border border-[color-mix(in_srgb,var(--warn)_40%,transparent)] bg-[color-mix(in_srgb,var(--warn)_10%,transparent)] px-4 py-3 text-sm text-[var(--warn)]">
+          {error}
+        </p>
+      )}
+
+      {/* Split workspace */}
+      <div className="lib-shell">
+        <div className="lib-list-pane flex min-h-0 flex-col">
+          <div className="lib-list-head">
+            <button
+              type="button"
+              className="lib-select-all"
+              onClick={toggleAll}
+              disabled={!items.length || loading}
+              aria-pressed={allSelected}
+            >
+              <span className="lib-check" data-checked={allSelected || undefined} aria-hidden />
+              <span>{allSelected ? "Снять все" : "Выбрать"}</span>
+            </button>
+            <p className="tabular-nums text-[var(--muted)]">
+              {loading ? "…" : (
+                <>
+                  <span className="text-[var(--ink)]">{materialsLabel(total)}</span>
+                  {items.length !== total && (
+                    <span className="opacity-70"> · на экране {items.length}</span>
+                  )}
+                </>
+              )}
+            </p>
+          </div>
+
+          <div
+            ref={listRef}
+            role="listbox"
+            aria-label="Материалы архива"
+            className="lib-list-scroll"
+          >
+            {loading ? (
+              <div className="space-y-0 p-2">
+                {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+                  <div key={i} className="flex gap-3 px-3 py-3">
+                    <div className="archive-skeleton h-4 w-6" />
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <div className="archive-skeleton h-4 w-3/4" />
+                      <div className="archive-skeleton h-3 w-full" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : items.length === 0 ? (
+              <div className="flex h-full min-h-[16rem] flex-col items-center justify-center px-6 py-12 text-center">
+                <p
+                  className="text-[1.6rem] tracking-[-0.03em]"
+                  style={{ fontFamily: "var(--font-display)" }}
+                >
+                  {filtersActive ? "Ничего не нашлось" : "Полка пуста"}
+                </p>
+                <p className="mt-2 max-w-xs text-sm text-[var(--muted)]">
+                  {filtersActive
+                    ? "Сбросьте фильтр или измените запрос."
+                    : "Добавьте ссылку или заметку с главной."}
+                </p>
+                <div className="mt-5">
+                  {filtersActive ? (
+                    <button type="button" onClick={clearFilters} className="card-btn card-btn-accent">
+                      Сбросить
+                    </button>
+                  ) : (
+                    <Link href="/" className="archive-cta">
+                      На главную
+                    </Link>
+                  )}
+                </div>
+              </div>
+            ) : (
+              items.map((item, i) => (
+                <div key={item.id} data-id={item.id}>
+                  <MaterialRow
+                    item={item}
+                    index={i}
+                    active={item.id === activeId}
+                    selectable
+                    selected={selected.has(item.id)}
+                    onSelect={setActiveId}
+                    onToggle={toggle}
+                    forceChecks={forceChecks}
+                  />
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <aside className="lib-preview-pane hidden min-h-0 lg:block">
+          <ArchivePreview
+            item={activeItem}
+            busy={busy}
+            onDelete={(id) => deleteIds([id])}
+          />
+        </aside>
+      </div>
+
+      <p className="mt-3 hidden text-[11px] text-[var(--muted)] lg:block">
+        ↑↓ — листать список · клик — превью · «Открыть карточку» — полный разбор
+      </p>
+
+      {selected.size > 0 && (
+        <div className="archive-selection mt-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm">
+            Выбрано <span className="text-[var(--accent)]">{selected.size}</span>
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => setSelected(new Set())} className="card-btn">
+              Снять
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => deleteIds([...selected])}
+              className="card-btn card-btn-danger"
+            >
+              {busy ? "Удаляю…" : "Удалить"}
+            </button>
+          </div>
         </div>
       )}
     </section>

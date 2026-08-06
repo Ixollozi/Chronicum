@@ -110,9 +110,9 @@ export function MomentsGallery({
   return (
     <section className="mt-10">
       <div className="mb-4 flex items-baseline justify-between gap-3">
-        <h2 className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">Ключевые моменты</h2>
-        <p className="text-xs text-[var(--muted)]">
-          {loading ? "загрузка…" : `${withImage} из ${moments.length} с кадром`}
+        <h2 className="card-label">Ключевые моменты</h2>
+        <p className="text-xs tabular-nums text-[var(--muted)]">
+          {loading ? "загрузка…" : `${withImage} / ${moments.length} кадров`}
         </p>
       </div>
 
@@ -122,7 +122,7 @@ export function MomentsGallery({
           return (
             <figure
               key={`${mom.t_sec}-${i}-${mom.image_relpath || "x"}`}
-              className="overflow-hidden border border-[var(--line)] bg-[var(--surface)]"
+              className="overflow-hidden border border-[var(--line)] bg-[var(--surface)] transition hover:border-[color-mix(in_srgb,var(--accent)_35%,var(--line))]"
             >
               {src ? (
                 <button
@@ -137,7 +137,7 @@ export function MomentsGallery({
                     alt={mom.caption || "момент"}
                     className="aspect-video w-full object-cover transition duration-200 group-hover:brightness-110"
                   />
-                  <span className="absolute bottom-2 left-2 rounded bg-black/70 px-2 py-0.5 text-[11px] text-white/90">
+                  <span className="absolute bottom-2 left-2 bg-black/70 px-2 py-0.5 text-[11px] tabular-nums text-white/90">
                     {fmtTime(mom.t_sec)}
                   </span>
                   <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-sm text-white opacity-0 transition group-hover:bg-black/25 group-hover:opacity-100">
@@ -146,11 +146,15 @@ export function MomentsGallery({
                 </button>
               ) : (
                 <div className="flex aspect-video items-center justify-center bg-black/20 text-xs text-[var(--muted)]">
-                  {loading ? "…" : `без кадра · ${fmtTime(mom.t_sec)}`}
+                  {loading ? (
+                    <span className="archive-skeleton h-3 w-16" />
+                  ) : (
+                    `без кадра · ${fmtTime(mom.t_sec)}`
+                  )}
                 </div>
               )}
-              <figcaption className="space-y-1 p-3 text-sm">
-                <p className="font-medium">{mom.caption || "Момент"}</p>
+              <figcaption className="space-y-1.5 p-3.5 text-sm">
+                <p className="font-medium leading-snug">{mom.caption || "Момент"}</p>
                 {mom.visible_text && (
                   <p className="text-xs text-[var(--muted)]">На экране: {mom.visible_text}</p>
                 )}

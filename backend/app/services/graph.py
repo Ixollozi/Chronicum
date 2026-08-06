@@ -11,31 +11,18 @@ from sqlalchemy.orm import selectinload
 from app.models import Material, MaterialTag, ProcessingStatus
 
 # Same idea, different spelling → one hub (less duplicate spokes / crossings)
-_TAG_ALIASES: dict[str, str] = {
-    "капкат": "capcut",
-    "cap cut": "capcut",
-    "cap-cut": "capcut",
-}
-
-_TAG_DISPLAY: dict[str, str] = {
-    "capcut": "CapCut",
-}
-
-
-def _norm_tag_key(name: str) -> str:
-    key = " ".join(name.strip().lower().split())
-    return _TAG_ALIASES.get(key, key)
+from app.services.taxonomy import TAG_DISPLAY, normalize_category_key, normalize_key as _norm_tag_key
 
 
 def _topic_id(kind: str, name: str) -> str:
     if kind == "tag":
         return f"tag:{_norm_tag_key(name)}"
-    return f"{kind}:{name.lower()}"
+    return f"{kind}:{normalize_category_key(name) or name.lower()}"
 
 
 def _tag_title(name: str) -> str:
     key = _norm_tag_key(name)
-    return _TAG_DISPLAY.get(key, name.strip())
+    return TAG_DISPLAY.get(key, name.strip())
 
 
 async def build_graph(session: AsyncSession, *, limit: int = 300) -> dict:

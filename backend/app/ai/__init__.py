@@ -25,8 +25,8 @@ Return ONLY valid JSON (no markdown fences) with this exact shape:
   "tools": ["..."],
   "technologies": ["..."],
   "links": ["..."],
-  "category": "must be one of the provided categories if possible",
-  "tags": ["prefer existing tags; new tags allowed"],
+  "category": "MUST be one of the provided categories when possible (exact name)",
+  "tags": ["2-6 tags; REUSE existing approved tags verbatim when they fit; avoid near-duplicates"],
   "usefulness_signals": {
     "actionability": 1-5,
     "novelty": 1-5,
@@ -424,7 +424,9 @@ async def analyze_material(
         f"{profile_block}\n"
         f"Existing categories: {', '.join(categories)}\n"
         f"Existing approved tags: {', '.join(tags) if tags else '(none yet)'}\n"
-        "Prefer existing category/tags. Always include a crisp digest for lazy readers.\n"
+        "Reuse existing category/tag strings exactly when they fit. "
+        "Do not invent spelling variants (CapCut/капкат/cap cut → one tag). "
+        "Always include a crisp digest for lazy readers.\n"
         "Be a strict reviewer on usefulness_signals — generosity and ignoring the personal profile make the archive useless."
     )
     user = f"Material text:\n\n{raw_text[:120000]}"

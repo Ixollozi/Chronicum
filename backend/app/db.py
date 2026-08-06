@@ -42,24 +42,33 @@ async def init_lite_db() -> None:
     """Create tables + seed categories for SQLite lite mode."""
     from sqlalchemy import select
 
+    from app.logging_setup import get_logger
     from app.models import Category
     from app.services.schema_migrate import ensure_schema
+    from app.services.taxonomy import merge_duplicate_taxonomy
+
+    log = get_logger(__name__)
 
     async with engine.begin() as conn:
         await ensure_schema(conn)
 
     async with SessionLocal() as session:
         existing = (await session.execute(select(Category).limit(1))).scalars().first()
-        if existing:
-            return
-        for name in [
-            "AI",
-            "\u041c\u0430\u0440\u043a\u0435\u0442\u0438\u043d\u0433",  # Маркетинг
-            "\u041f\u0440\u043e\u0434\u0430\u0436\u0438",  # Продажи
-            "\u041f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435",  # Программирование
-            "\u0414\u0438\u0437\u0430\u0439\u043d",  # Дизайн
-            "\u0411\u0438\u0437\u043d\u0435\u0441",  # Бизнес
-            "\u0424\u0440\u0438\u043b\u0430\u043d\u0441",  # Фриланс
-        ]:
-            session.add(Category(name=name))
+        if not existing:
+            for name in [
+                "AI",
+                "\u041c\u0430\u0440\u043a\u0435\u0442\u0438\u043d\u0433",  # Маркетинг
+                "\u041f\u0440\u043e\u0434\u0430\u0436\u0438",  # Продажи
+                "\u041f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435",  # Программирование
+                "\u0414\u0438\u0437\u0430\u0439\u043d",  # Дизайн
+                "\u0411\u0438\u0437\u043d\u0435\u0441",  # Бизнес
+                "\u0424\u0440\u0438\u043b\u0430\u043d\u0441",  # Фриланс
+            ]:
+                session.add(Category(name=name))
+            await session.commit()
+
+    async with SessionLocal() as session:
+        stats = await merge_duplicate_taxonomy(session)
         await session.commit()
+        if any(stats.values()):
+            log.info("taxonomy_startup_dedupe", **stats)

@@ -380,16 +380,15 @@ async def list_categories(session: AsyncSession = Depends(get_session)):
 
 @router.post("/categories", response_model=CategoryOut)
 async def create_category(body: CategoryCreate, session: AsyncSession = Depends(get_session)):
+    from app.services.taxonomy import load_taxonomy, resolve_category
+
     name = body.name.strip()
     if not name:
         raise HTTPException(400, "Empty category name")
-    existing = (
-        await session.execute(select(Category).where(Category.name.ilike(name)))
-    ).scalars().first()
-    if existing:
-        return CategoryOut(id=existing.id, name=existing.name)
-    c = Category(name=name)
-    session.add(c)
+    tax = await load_taxonomy(session)
+    c = await resolve_category(session, name, tax.cat_by_key, allow_create=True)
+    if not c:
+        raise HTTPException(400, "Invalid category name")
     await session.commit()
     await session.refresh(c)
     return CategoryOut(id=c.id, name=c.name)

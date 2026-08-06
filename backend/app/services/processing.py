@@ -12,13 +12,10 @@ from app.ai import analyze_material
 from app.config import get_settings
 from app.logging_setup import get_logger
 from app.models import (
-    Category,
     Material,
     MaterialTag,
     ProcessingStage,
     ProcessingStatus,
-    Tag,
-    TagStatus,
 )
 from app.pipelines import extract_text_for_material
 from app.services.key_pool import any_provider_ready, get_app_settings
@@ -80,17 +77,16 @@ async def create_material(
     return material
 
 
-async def _taxonomy(session: AsyncSession) -> tuple[list[str], list[str], dict[str, Category], dict[str, Tag]]:
-    cats = (await session.execute(select(Category))).scalars().all()
-    # All statuses — avoids UNIQUE fails when AI proposes an already-pending tag
-    all_tags = (await session.execute(select(Tag))).scalars().all()
-    approved_names = [t.name for t in all_tags if t.status == TagStatus.APPROVED.value]
-    cat_map = {c.name.lower(): c for c in cats}
-    tag_map = {t.name.lower(): t for t in all_tags}
-    return [c.name for c in cats], approved_names, cat_map, tag_map
+async def _taxonomy(session: AsyncSession) -> tuple[list[str], list[str], dict, dict]:
+    from app.services.taxonomy import load_taxonomy
+
+    tax = await load_taxonomy(session)
+    return tax.categories, tax.approved_tags, tax.cat_by_key, tax.tag_by_key
 
 
 async def _apply_card(session: AsyncSession, material: Material, card, cat_map, tag_map) -> None:
+    from app.services.taxonomy import resolve_category, resolve_tag
+
     material.title = card.title
     material.summary = card.summary
     material.main_idea = card.main_idea
@@ -107,53 +103,28 @@ async def _apply_card(session: AsyncSession, material: Material, card, cat_map, 
     material.usefulness_reason = card.usefulness_reason
     material.usefulness_updated_at = datetime.now(timezone.utc)
 
-    cat = cat_map.get(card.category.lower())
-    if not cat:
-        for name, c in cat_map.items():
-            if name in card.category.lower() or card.category.lower() in name:
-                cat = c
-                break
-    if not cat and card.category.strip():
-        existing_cat = (
-            await session.execute(select(Category).where(Category.name.ilike(card.category.strip())))
-        ).scalars().first()
-        if existing_cat:
-            cat = existing_cat
-        else:
-            cat = Category(name=card.category.strip()[:100])
-            session.add(cat)
-            await session.flush()
-        cat_map[cat.name.lower()] = cat
+    cat = await resolve_category(session, card.category or "", cat_map, allow_create=True)
     if cat:
         material.category_id = cat.id
 
     material.tags.clear()
     await session.flush()
 
-    for tag_name in card.tags:
-        key = tag_name.strip().lower()
-        if not key:
+    seen_tag_ids: set[int] = set()
+    for tag_name in card.tags or []:
+        tag = await resolve_tag(
+            session,
+            tag_name,
+            tag_map,
+            allow_create=True,
+            auto_approve=True,
+        )
+        if not tag or tag.id in seen_tag_ids:
             continue
-        existing = tag_map.get(key)
-        if not existing:
-            existing = (
-                await session.execute(select(Tag).where(Tag.name.ilike(tag_name.strip())))
-            ).scalars().first()
-            if existing:
-                tag_map[key] = existing
-
-        if existing:
-            if existing.status == TagStatus.REJECTED.value:
-                continue
-            tag = existing
-            proposed = existing.status != TagStatus.APPROVED.value
-        else:
-            tag = Tag(name=tag_name.strip()[:100], status=TagStatus.PENDING.value)
-            session.add(tag)
-            await session.flush()
-            tag_map[key] = tag
-            proposed = True
-        session.add(MaterialTag(material_id=material.id, tag_id=tag.id, proposed=proposed))
+        seen_tag_ids.add(tag.id)
+        session.add(
+            MaterialTag(material_id=material.id, tag_id=tag.id, proposed=False)
+        )
 
 
 async def _refresh_search_vector(session: AsyncSession, material_id: str) -> None:
