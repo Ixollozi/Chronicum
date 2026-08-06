@@ -1,0 +1,65 @@
+from collections.abc import AsyncGenerator
+from pathlib import Path
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
+
+from app.config import PROJECT_ROOT, get_settings
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def _make_engine():
+    settings = get_settings()
+    url = settings.database_url
+    kwargs: dict = {"pool_pre_ping": True}
+    if url.startswith("sqlite"):
+        # Ensure parent dir exists for file DB
+        if ":///" in url:
+            raw = url.split(":///", 1)[1]
+            path = Path(raw)
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            url = f"sqlite+aiosqlite:///{path.as_posix()}"
+        kwargs = {"connect_args": {"check_same_thread": False}}
+    return create_async_engine(url, **kwargs)
+
+
+settings = get_settings()
+engine = _make_engine()
+SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    async with SessionLocal() as session:
+        yield session
+
+
+async def init_lite_db() -> None:
+    """Create tables + seed categories for SQLite lite mode."""
+    from sqlalchemy import select
+
+    from app.models import Category
+    from app.services.schema_migrate import ensure_schema
+
+    async with engine.begin() as conn:
+        await ensure_schema(conn)
+
+    async with SessionLocal() as session:
+        existing = (await session.execute(select(Category).limit(1))).scalars().first()
+        if existing:
+            return
+        for name in [
+            "AI",
+            "\u041c\u0430\u0440\u043a\u0435\u0442\u0438\u043d\u0433",  # Маркетинг
+            "\u041f\u0440\u043e\u0434\u0430\u0436\u0438",  # Продажи
+            "\u041f\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435",  # Программирование
+            "\u0414\u0438\u0437\u0430\u0439\u043d",  # Дизайн
+            "\u0411\u0438\u0437\u043d\u0435\u0441",  # Бизнес
+            "\u0424\u0440\u0438\u043b\u0430\u043d\u0441",  # Фриланс
+        ]:
+            session.add(Category(name=name))
+        await session.commit()
