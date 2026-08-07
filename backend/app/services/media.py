@@ -252,12 +252,9 @@ def score_frame_file(path: str) -> float:
 
         text_bonus = 0.0
         try:
-            import pytesseract
-            from PIL import Image
+            from app.services.local_ocr import ocr_image_file
 
-            small = cv2.resize(img, (min(960, w), int(min(960, w) * h / max(1, w))))
-            ocr = pytesseract.image_to_string(Image.fromarray(cv2.cvtColor(small, cv2.COLOR_BGR2RGB)))
-            cleaned = re.sub(r"\s+", " ", (ocr or "").strip())
+            cleaned = re.sub(r"\s+", " ", (ocr_image_file(path) or "").strip())
             words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]{2,}", cleaned)
             text_bonus = min(180.0, len(cleaned) * 0.8 + len(words) * 6.0)
         except Exception:

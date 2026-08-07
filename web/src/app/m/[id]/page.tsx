@@ -3,12 +3,20 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { CodeBlocksPanel } from "@/components/CodeBlocksPanel";
+import { LinksPanel } from "@/components/LinksPanel";
 import { MaterialListen } from "@/components/MaterialListen";
+import { MaterialProcessing } from "@/components/MaterialProcessing";
 import { MomentsGallery } from "@/components/MomentsGallery";
 import { RichText } from "@/components/RichText";
 import { TranscriptView } from "@/components/TranscriptView";
 import { StatusPill, cleanMetaPart, formatShortDate } from "@/components/MaterialRow";
-import { client, type MaterialDetail } from "@/lib/api";
+import {
+  client,
+  normalizeCodeBlocks,
+  normalizeMaterialLinks,
+  type MaterialDetail,
+} from "@/lib/api";
 
 const SOURCE_LABEL: Record<string, string> = {
   youtube: "YouTube",
@@ -71,21 +79,27 @@ export default function MaterialPage() {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 5000);
+    const busy = m && ["queued", "processing"].includes(m.processing_status);
+    const t = setInterval(load, busy ? 2000 : 5000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, m?.processing_status]);
 
   const slides: Slide[] = useMemo(() => {
     if (!m) return [{ id: "overview", label: "Обзор" }];
+    // Tabs only after the card is ready to read
+    if (["queued", "processing"].includes(m.processing_status)) {
+      return [{ id: "overview", label: "Обзор" }];
+    }
     const list: Slide[] = [{ id: "overview", label: "Обзор" }];
     if (m.key_ideas?.length) list.push({ id: "ideas", label: "Идеи" });
     if (m.practical_takeaways?.length) list.push({ id: "takeaways", label: "Выводы" });
+    if (normalizeCodeBlocks(m.code_blocks).length) list.push({ id: "code", label: "Код" });
+    if (normalizeMaterialLinks(m.links).length) list.push({ id: "links", label: "Ссылки" });
     if (m.objective_evaluation) list.push({ id: "evaluation", label: "Оценка" });
     if (m.ai_opinion) list.push({ id: "opinion", label: "Мнение" });
     if (m.detailed_explanation) list.push({ id: "explain", label: "Подробно" });
-    const videoish = ["youtube", "instagram", "video"].includes(m.source_type);
-    if (videoish || (m.key_moments?.length ?? 0) > 0) {
+    if ((m.key_moments?.length ?? 0) > 0) {
       list.push({ id: "moments", label: "Кадры" });
     }
     if (m.raw_text) list.push({ id: "raw", label: "Текст" });
@@ -199,6 +213,39 @@ export default function MaterialPage() {
   const source = SOURCE_LABEL[m.source_type] || m.source_type;
   const category = cleanMetaPart(m.category);
   const isProcessing = ["queued", "processing"].includes(m.processing_status);
+  const cardReady = !isProcessing && m.processing_status !== "failed";
+
+  if (!cardReady) {
+    return (
+      <div className="deck-page animate-fade" data-has-nav="false">
+        <div className="deck-frame">
+          <header className="deck-chrome">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+              <Link href="/archive" className="deck-back">
+                ← Архив
+              </Link>
+              <StatusPill status={m.processing_status} />
+            </div>
+          </header>
+          <div className="deck-stage deck-stage--proc">
+            <MaterialProcessing
+              title={m.title}
+              sourceLabel={source}
+              status={m.processing_status}
+              stage={m.processing_stage}
+              retryBusy={busy === "retry"}
+              onRetry={
+                m.processing_status === "failed"
+                  ? () => void run("retry", () => client.retry(m.id).then(() => client.getMaterial(m.id)))
+                  : undefined
+              }
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const scoreValue = m.usefulness_score;
   const dateLabel = formatShortDate(m.created_at);
   const current = slides[slide] || slides[0];
@@ -227,6 +274,14 @@ export default function MaterialPage() {
     case "takeaways":
       (m.practical_takeaways || []).forEach((item, i) => {
         speakParts.push(`Вывод ${i + 1}. ${item}`);
+      });
+      break;
+    case "code":
+      // Code is for reading/copying — no TTS
+      break;
+    case "links":
+      normalizeMaterialLinks(m.links).forEach((l, i) => {
+        speakParts.push(`${l.title || `Ссылка ${i + 1}`}: ${l.url}`);
       });
       break;
     case "evaluation": {
@@ -586,6 +641,32 @@ export default function MaterialPage() {
             </ul>
           </div>
         );
+
+      case "code": {
+        const blocks = normalizeCodeBlocks(m.code_blocks);
+        return (
+          <div className="deck-slide-inner deck-slide-wide">
+            <header className="deck-slide-head">
+              <p className="deck-kicker">Код</p>
+              <span className="deck-slide-count">{blocks.length}</span>
+            </header>
+            <CodeBlocksPanel blocks={blocks} />
+          </div>
+        );
+      }
+
+      case "links": {
+        const links = normalizeMaterialLinks(m.links);
+        return (
+          <div className="deck-slide-inner">
+            <header className="deck-slide-head">
+              <p className="deck-kicker">Ссылки</p>
+              <span className="deck-slide-count">{links.length}</span>
+            </header>
+            <LinksPanel links={links} />
+          </div>
+        );
+      }
 
       case "evaluation":
         return (

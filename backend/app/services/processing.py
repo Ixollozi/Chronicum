@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.ai import analyze_material
-from app.config import get_settings
+from app.config import PROJECT_ROOT, get_settings
 from app.logging_setup import get_logger
 from app.models import (
     Material,
@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.pipelines import extract_text_for_material
 from app.services.key_pool import any_provider_ready, get_app_settings
+from app.services.resources import harvest_resources, merge_card_resources
 
 log = get_logger(__name__)
 
@@ -96,9 +97,19 @@ async def _apply_card(session: AsyncSession, material: Material, card, cat_map, 
         material.digest = card.summary
     material.key_ideas = card.key_ideas
     material.practical_takeaways = card.practical_takeaways
-    material.tools = card.tools
+
+    harvest = harvest_resources(material.raw_text)
+    card_links = card.links or []
+    if card_links and hasattr(card_links[0], "model_dump"):
+        card_links = [x.model_dump() for x in card_links]
+    tools, links = merge_card_resources(card.tools or [], card_links, harvest)
+    material.tools = tools
     material.technologies = card.technologies
-    material.links = card.links
+    material.links = links
+    blocks = getattr(card, "code_blocks", None) or []
+    material.code_blocks = [
+        b.model_dump() if hasattr(b, "model_dump") else b for b in blocks
+    ]
     material.usefulness_score = card.usefulness_score
     material.usefulness_reason = card.usefulness_reason
     material.usefulness_updated_at = datetime.now(timezone.utc)
@@ -180,6 +191,11 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
 
         stage = _decide_stage(material.source_type, material.duration_seconds, force_full, settings)
 
+        storage = Path(settings.storage_path)
+        if not storage.is_absolute():
+            storage = PROJECT_ROOT / storage
+        atlas_dir = str(storage / "materials" / material_id / "atlas")
+
         raw_text, title, dur, audio_sec, media_path = await extract_text_for_material(
             source_type=material.source_type,
             source_url=material.source_url,
@@ -187,6 +203,8 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
             note_text=material.raw_text,
             stage=stage,
             settings=settings,
+            atlas_dir=atlas_dir if material.source_type in {"youtube", "instagram", "video"} else None,
+            session=session,
         )
         if dur is not None:
             material.duration_seconds = dur
@@ -208,6 +226,7 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
 
         categories, tags, cat_map, tag_map = await _taxonomy(session)
         app_cfg = await get_app_settings(session)
+        screen_resources = harvest_resources(raw_text).prompt_block()
         llm = await analyze_material(
             raw_text,
             categories=categories,
@@ -216,6 +235,7 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
             settings=settings,
             session=session,
             personal_profile=app_cfg.get("personal_profile"),
+            screen_resources=screen_resources,
         )
         material.usage_tokens_in = (material.usage_tokens_in or 0) + llm.tokens_in
         material.usage_tokens_out = (material.usage_tokens_out or 0) + llm.tokens_out

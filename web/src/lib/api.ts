@@ -13,13 +13,26 @@ export type MaterialListItem = {
   created_at: string | null;
 };
 
+export type MaterialLink = {
+  url: string;
+  title?: string;
+  source?: string;
+};
+
+export type CodeBlock = {
+  title?: string;
+  language?: string;
+  code: string;
+};
+
 export type MaterialDetail = MaterialListItem & {
   raw_text: string | null;
   key_ideas: string[];
   practical_takeaways: string[];
   tools: string[];
   technologies: string[];
-  links: string[];
+  links: Array<string | MaterialLink>;
+  code_blocks?: CodeBlock[];
   usefulness_reason: string | null;
   error_message: string | null;
   duration_seconds: number | null;
@@ -50,6 +63,36 @@ export type MaterialDetail = MaterialListItem & {
     image_relpath?: string | null;
   }[];
 };
+
+export function normalizeMaterialLinks(links: Array<string | MaterialLink> | null | undefined): MaterialLink[] {
+  if (!links?.length) return [];
+  const out: MaterialLink[] = [];
+  const seen = new Set<string>();
+  for (const item of links) {
+    const link: MaterialLink =
+      typeof item === "string"
+        ? { url: item, title: "", source: "" }
+        : { url: item.url || "", title: item.title || "", source: item.source || "" };
+    const url = (link.url || "").trim();
+    if (!url) continue;
+    const key = url.replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/$/, "").toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...link, url });
+  }
+  return out;
+}
+
+export function normalizeCodeBlocks(blocks: CodeBlock[] | null | undefined): CodeBlock[] {
+  if (!blocks?.length) return [];
+  return blocks
+    .map((b) => ({
+      title: (b.title || "").trim(),
+      language: (b.language || "text").trim() || "text",
+      code: (b.code || "").replace(/\r\n/g, "\n").trim(),
+    }))
+    .filter((b) => b.code.length > 0);
+}
 
 export type PersonalProfile = {
   role: string;

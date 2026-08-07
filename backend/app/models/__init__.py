@@ -94,6 +94,7 @@ class Material(Base):
     ai_opinion_sources: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     ai_opinion_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     key_moments: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
+    code_blocks: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     key_ideas: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     practical_takeaways: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     tools: Mapped[list[Any] | None] = mapped_column(JSON, default=list)

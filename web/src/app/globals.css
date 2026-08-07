@@ -2902,7 +2902,7 @@ select option {
   margin: 0;
 }
 
-/* Mobile: audio directly under title/meta, before body copy */
+/* Mobile: audio directly under title/meta, score under audio, then body copy */
 @media (max-width: 899px) {
   .deck-overview {
     display: flex;
@@ -2921,20 +2921,22 @@ select option {
 
   .deck-overview-listen {
     order: 2;
-    margin-bottom: 1.05rem;
-  }
-
-  .deck-overview-copy {
-    order: 3;
+    margin-bottom: 0.65rem;
   }
 
   .deck-overview-rail > .deck-score-row {
-    order: 4;
-    margin-top: 1.05rem;
+    order: 3;
+    margin-top: 0;
+    margin-bottom: 0.35rem;
   }
 
   .deck-overview-rail > .deck-reason-wrap,
   .deck-overview-rail > .deck-score-panel {
+    order: 4;
+    margin-bottom: 0.85rem;
+  }
+
+  .deck-overview-copy {
     order: 5;
   }
 
@@ -3422,6 +3424,305 @@ select option {
   margin: 0;
   font-size: 0.95rem;
   line-height: 1.55;
+}
+
+/* Material processing screen */
+.deck-stage--proc {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: min(70dvh, 36rem);
+}
+
+.mat-proc {
+  width: min(100%, 26rem);
+  margin: 0 auto;
+  padding: 1.25rem 0.5rem 2rem;
+  text-align: center;
+}
+
+.mat-proc-orb {
+  position: relative;
+  width: 7.5rem;
+  height: 7.5rem;
+  margin: 0 auto 1.6rem;
+}
+
+.mat-proc-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.mat-proc-ring--a {
+  animation: mat-proc-spin 7s linear infinite;
+  border-top-color: var(--accent);
+  border-right-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.mat-proc-ring--b {
+  inset: 0.55rem;
+  animation: mat-proc-spin 4.5s linear infinite reverse;
+  border-bottom-color: color-mix(in srgb, var(--accent) 70%, #fff);
+  opacity: 0.75;
+}
+
+.mat-proc-ring--c {
+  inset: 1.1rem;
+  animation: mat-proc-pulse 2.2s ease-in-out infinite;
+  border-style: dashed;
+  opacity: 0.45;
+}
+
+.mat-proc-core {
+  position: absolute;
+  inset: 1.85rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 35%, transparent), transparent 55%),
+    color-mix(in srgb, var(--surface) 92%, #000);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  box-shadow: 0 0 28px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.mat-proc-core-glow {
+  position: absolute;
+  inset: -30%;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 22%, transparent), transparent 68%);
+  animation: mat-proc-breathe 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.mat-proc-core-mark {
+  position: relative;
+  z-index: 1;
+  font-size: 1.35rem;
+  color: var(--accent);
+  line-height: 1;
+}
+
+.mat-proc-kicker {
+  margin: 0 0 0.45rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.mat-proc-title {
+  margin: 0;
+  font-size: clamp(1.65rem, 5vw, 2.15rem);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  color: var(--ink);
+}
+
+.mat-proc-sub {
+  margin: 0.7rem auto 0;
+  max-width: 28ch;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.mat-proc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+  margin-top: 1.1rem;
+}
+
+.mat-proc-chip {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  padding: 0.28rem 0.7rem;
+  font-size: 0.75rem;
+  color: color-mix(in srgb, var(--ink) 85%, var(--muted));
+}
+
+.mat-proc-chip--soft {
+  color: var(--muted);
+}
+
+.mat-proc-steps {
+  list-style: none;
+  margin: 1.55rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  text-align: left;
+}
+
+.mat-proc-step {
+  display: grid;
+  grid-template-columns: 1.7rem 1fr;
+  gap: 0.7rem;
+  align-items: start;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.85rem;
+  border: 1px solid transparent;
+  transition: background 0.25s ease, border-color 0.25s ease, opacity 0.25s ease;
+}
+
+.mat-proc-step[data-state="todo"] {
+  opacity: 0.42;
+}
+
+.mat-proc-step[data-state="active"] {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.mat-proc-step[data-state="done"] {
+  opacity: 0.78;
+}
+
+.mat-proc-step-dot {
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 0.68rem;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--bg-deep) 70%, transparent);
+}
+
+.mat-proc-step[data-state="active"] .mat-proc-step-dot {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: transparent;
+  position: relative;
+}
+
+.mat-proc-step[data-state="active"] .mat-proc-step-dot::after {
+  content: "";
+  position: absolute;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: mat-proc-dot 1s ease-in-out infinite;
+}
+
+.mat-proc-step[data-state="done"] .mat-proc-step-dot {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+  color: var(--accent);
+  font-size: 0.75rem;
+}
+
+.mat-proc-step-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  padding-top: 0.15rem;
+}
+
+.mat-proc-step-label {
+  font-size: 0.92rem;
+  color: var(--ink);
+}
+
+.mat-proc-step-hint {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.mat-proc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.55rem;
+  margin-top: 1.6rem;
+}
+
+.mat-proc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  padding: 0.45rem 1rem;
+  font-size: 0.88rem;
+  color: var(--muted);
+  background: transparent;
+}
+
+.mat-proc-btn--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--btn-fg);
+}
+
+.mat-proc-btn:disabled {
+  opacity: 0.45;
+}
+
+@keyframes mat-proc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes mat-proc-pulse {
+  0%,
+  100% {
+    transform: scale(0.96);
+    opacity: 0.35;
+  }
+  50% {
+    transform: scale(1.04);
+    opacity: 0.65;
+  }
+}
+
+@keyframes mat-proc-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes mat-proc-dot {
+  0%,
+  100% {
+    transform: scale(0.85);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mat-proc-ring--a,
+  .mat-proc-ring--b,
+  .mat-proc-ring--c,
+  .mat-proc-core-glow,
+  .mat-proc-step[data-state="active"] .mat-proc-step-dot::after {
+    animation: none;
+  }
 }
 
 .deck-kicker {
@@ -3992,6 +4293,137 @@ select option {
   flex-shrink: 0;
   border-radius: 999px;
   background: var(--accent);
+}
+
+.deck-code-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.deck-code-block {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: color-mix(in srgb, var(--bg-deep) 70%, transparent);
+  overflow: hidden;
+  animation: deck-item-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.deck-code-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem 0.55rem;
+}
+
+.deck-code-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.deck-code-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.deck-code-lang {
+  align-self: flex-start;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.deck-code-copy {
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.74rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.deck-code-copy:hover {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.deck-code-body {
+  margin: 0;
+  padding: 0 0.65rem 0.75rem;
+}
+
+.deck-code-body .rich-pre {
+  margin: 0;
+  max-height: min(52vh, 28rem);
+  overflow: auto;
+}
+
+.deck-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.deck-links li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: center;
+  animation: deck-item-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.deck-link-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.deck-link-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+}
+
+.deck-link-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.deck-link-url {
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deck-link-source {
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0.28rem 0.55rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
 }
 
 .deck-verdict {

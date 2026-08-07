@@ -3,9 +3,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytesseract
-from PIL import Image
-
 from app.ai import get_transcribe_client
 from app.config import Settings, get_settings
 from app.logging_setup import get_logger
@@ -19,6 +16,8 @@ from app.services.media import (
     extract_keyframes,
     probe_duration_seconds,
 )
+from app.services.resources import normalize_asr_glitches
+from app.services.screen_atlas import build_screen_atlas, format_timed_ocr_block
 
 log = get_logger(__name__)
 
@@ -36,10 +35,12 @@ async def _whisper_client(settings: Settings):
 
 async def ocr_frames(paths: list[str]) -> str:
     def _ocr() -> str:
+        from app.services.local_ocr import ocr_image_file
+
         parts = []
         for p in paths:
             try:
-                text = pytesseract.image_to_string(Image.open(p)).strip()
+                text = ocr_image_file(p)
                 if text:
                     parts.append(text)
             except Exception as e:
@@ -57,12 +58,16 @@ async def extract_text_for_material(
     note_text: str | None,
     stage: str,
     settings: Settings | None = None,
+    atlas_dir: str | None = None,
+    session=None,
 ) -> tuple[str, str | None, float | None, float, str | None]:
     """
     Returns (raw_text, title, duration_seconds, audio_seconds_used, media_path).
     media_path — local video/media file worth persisting for screenshots.
+    atlas_dir — optional dir for timed OCR atlas (materials/{id}/atlas).
     """
     settings = settings or get_settings()
+    from app.services.localize import localize_transcript_to_russian
 
     if source_type == "note":
         return (note_text or "").strip(), (note_text or "")[:80], None, 0.0, None
@@ -99,6 +104,7 @@ async def extract_text_for_material(
                 audio_for_asr = file_path
 
         client = await _whisper_client(settings)
+        # Voice notes are almost always Russian
         result = await client.transcribe(audio_for_asr, language="ru")
         title = Path(file_path).stem or "Голосовая заметка"
         return (
@@ -135,10 +141,13 @@ async def extract_text_for_material(
             src_for_cut = video_for_frames if source_type == "video" else audio_path
             try:
                 await extract_audio_segment(src_for_cut, 0, seg_dur, seg_path)
-                tr = await client.transcribe(seg_path, language="ru")
+                tr = await client.transcribe(seg_path, language="auto")
             except Exception:
-                tr = await client.transcribe(audio_path, language="ru")
-            text = tr.text
+                tr = await client.transcribe(audio_path, language="auto")
+            text = normalize_asr_glitches(tr.text)
+            text = await localize_transcript_to_russian(
+                text, language=getattr(tr, "language", None), session=session
+            )
             frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_preview_frames"))
             frames = await extract_keyframes(
                 video_for_frames, frames_dir, every_seconds=max(8, int(seg_dur / 4)), max_frames=6
@@ -148,13 +157,39 @@ async def extract_text_for_material(
                 text = f"{text}\n\n[On-screen text OCR preview]\n{ocr}"
             return text, title, duration, tr.audio_seconds, media_path
 
-        tr = await client.transcribe(audio_path, language="ru")
-        text = tr.text
-        frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_frames"))
-        frames = await extract_keyframes(video_for_frames, frames_dir)
-        ocr = await ocr_frames(frames)
-        if ocr:
-            text = f"{text}\n\n[On-screen text OCR]\n{ocr}"
+        tr = await client.transcribe(audio_path, language="auto")
+        text = normalize_asr_glitches(tr.text)
+        text = await localize_transcript_to_russian(
+            text, language=getattr(tr, "language", None), session=session
+        )
+        out_atlas = atlas_dir
+        if not out_atlas and video_for_frames:
+            out_atlas = str(Path(video_for_frames).with_name(Path(video_for_frames).stem + "_atlas"))
+        try:
+            atlas_frames = await build_screen_atlas(
+                video_for_frames,
+                out_atlas,
+                duration=duration,
+                source_type=source_type,
+                keep_top_n=24,
+            )
+            ocr_block = format_timed_ocr_block(atlas_frames)
+            if ocr_block:
+                text = f"{text}\n\n{ocr_block}"
+            else:
+                # Fallback sparse keyframes if atlas empty
+                frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_frames"))
+                frames = await extract_keyframes(video_for_frames, frames_dir)
+                ocr = await ocr_frames(frames)
+                if ocr:
+                    text = f"{text}\n\n[On-screen text OCR]\n{ocr}"
+        except Exception as e:
+            log.warning("screen_atlas_failed", error=str(e)[:300])
+            frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_frames"))
+            frames = await extract_keyframes(video_for_frames, frames_dir)
+            ocr = await ocr_frames(frames)
+            if ocr:
+                text = f"{text}\n\n[On-screen text OCR]\n{ocr}"
         return text, title, duration, tr.audio_seconds, media_path
 
     raise ValueError(f"Unknown source_type={source_type}")

@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     transcribe_provider: str = "groq"
     groq_llm_model: str = "llama-3.3-70b-versatile"
     groq_whisper_model: str = "whisper-large-v3"
+    # Whisper language: "auto" = omit (detect), or ISO code like "ru" / "en"
+    whisper_language: str = "auto"
     groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     google_ai_api_key: str = ""
     google_ai_model: str = "gemini-2.0-flash"

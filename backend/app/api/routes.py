@@ -81,6 +81,7 @@ def to_list_item(m: Material) -> MaterialListItem:
 
 def to_detail(m: Material) -> MaterialDetail:
     from app.services.audio_media import material_has_audio
+    from app.services.resources import coerce_link_items
 
     base = to_list_item(m)
     return MaterialDetail(
@@ -90,7 +91,8 @@ def to_detail(m: Material) -> MaterialDetail:
         practical_takeaways=m.practical_takeaways or [],
         tools=m.tools or [],
         technologies=m.technologies or [],
-        links=m.links or [],
+        links=coerce_link_items(m.links or []),
+        code_blocks=getattr(m, "code_blocks", None) or [],
         usefulness_reason=m.usefulness_reason,
         error_message=m.error_message,
         duration_seconds=m.duration_seconds,
@@ -504,6 +506,7 @@ async def patch_settings_api(body: AppSettingsUpdate, session: AsyncSession = De
             session,
             default_depth=body.default_depth,
             auto_moments=body.auto_moments,
+            moments_vision_gate=body.moments_vision_gate,
             personal_profile=body.personal_profile.model_dump() if body.personal_profile is not None else None,
         )
     except ValueError as e:

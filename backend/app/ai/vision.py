@@ -77,8 +77,10 @@ async def analyze_moment_frame(
         '{"caption":"конкретно что на экране (UI/схема/шаги/текст)","why":"зачем этот кадр полезен",'
         '"when_to_apply":"когда применять","visible_text":"весь читаемый текст с экрана",'
         '"quality":1-5,"junk":false}\n'
-        "junk=true если это логотип/титульный экран/заставка/интро/аутро/конец без учебной пользы "
-        "или просто пейзаж/размытие без UI и без actionable content.\n"
+        "junk=true ТОЛЬКО если это голый логотип автора / заставка без текста / интро-аутро CTA "
+        "без учебной пользы / размытие без UI.\n"
+        "junk=false для: титров шагов (#1 #4 музыка), списков брендов/сайтов, UI монтажа, "
+        "экранных формул и списков инструментов — это ХОРОШИЕ кадры.\n"
         "caption и why — конкретные, без воды. Русский."
     )
 
@@ -108,9 +110,12 @@ async def analyze_moment_frame(
     except (TypeError, ValueError):
         quality = 0
     junk = bool(data.get("junk"))
-    junk_hints = ("логотип", "титульн", "заставк", "intro", "outro", "thumbnail", "обложк", "эндкард", "end card")
-    blob = f"{caption} {why}".lower()
-    if any(h in blob for h in junk_hints) and quality <= 3:
+    junk_hints = ("логотип автора", "заставк", "intro cta", "outro", "thumbnail", "обложк", "эндкард", "end card")
+    keep_hints = ("#", "шаг", "envato", "pexels", "storyblocks", "premiere", "davinci", "список", "для сток")
+    blob = f"{caption} {why} {visible}".lower()
+    if any(h in blob for h in keep_hints):
+        junk = False
+    elif any(h in blob for h in junk_hints) and quality <= 3:
         junk = True
     if not caption and raw and not data:
         caption = raw.strip()[:400]

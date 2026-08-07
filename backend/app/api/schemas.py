@@ -30,6 +30,7 @@ class MaterialDetail(MaterialListItem):
     tools: list[Any] = Field(default_factory=list)
     technologies: list[Any] = Field(default_factory=list)
     links: list[Any] = Field(default_factory=list)
+    code_blocks: list[Any] = Field(default_factory=list)
     usefulness_reason: str | None = None
     error_message: str | None = None
     duration_seconds: float | None = None
@@ -158,6 +159,7 @@ class PersonalProfile(BaseModel):
 class AppSettingsOut(BaseModel):
     default_depth: str = "standard"  # compact | standard | detailed
     auto_moments: bool = True
+    moments_vision_gate: bool = False
     provider_order: list[str] = Field(default_factory=lambda: ["groq", "google"])
     personal_profile: PersonalProfile = Field(default_factory=PersonalProfile)
 
@@ -165,6 +167,7 @@ class AppSettingsOut(BaseModel):
 class AppSettingsUpdate(BaseModel):
     default_depth: str | None = None
     auto_moments: bool | None = None
+    moments_vision_gate: bool | None = None
     personal_profile: PersonalProfile | None = None
 
 

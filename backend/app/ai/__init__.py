@@ -17,14 +17,15 @@ CARD_JSON_SCHEMA_HINT = """
 Return ONLY valid JSON (no markdown fences) with this exact shape:
 {
   "title": "string",
-  "summary": "2-3 sentences",
-  "main_idea": "1 sentence",
-  "digest": "ultra-short lazy digest: 3-6 bullet points as one string with newlines, max ~800 chars",
-  "key_ideas": ["..."],
-  "practical_takeaways": ["..."],
-  "tools": ["..."],
+  "summary": "2-3 sentences: context + hook + CTA if any. Do NOT enumerate every step.",
+  "main_idea": "1 thesis why this is worth saving — NOT a copy of the step list",
+  "digest": "3-7 actionable bullets as one string with newlines; EACH bullet should name concrete tools/sites from the material or SCREEN RESOURCES when present; max ~800 chars",
+  "key_ideas": ["2-4 abstract principles — MUST NOT paraphrase digest bullets"],
+  "practical_takeaways": ["do X via Y — each item names a concrete tool/service"],
+  "tools": ["named tools/apps from speech OR screen"],
   "technologies": ["..."],
-  "links": ["..."],
+  "links": [{"url": "https://...", "title": "short Russian label", "source": "llm"}],
+  "code_blocks": [{"title": "short Russian label", "language": "python|javascript|bash|css|sql|text", "code": "light runnable snippet"}],
   "category": "EXACT name from Existing categories only, or \"\" if none fit. NEVER invent / force a mismatched category (e.g. do not pick Маркетинг for unrelated banter)",
   "tags": ["2-6 tags; REUSE existing approved tags verbatim when they fit; avoid near-duplicates; skip fluff tags for empty/noise content"],
   "usefulness_signals": {
@@ -37,6 +38,14 @@ Return ONLY valid JSON (no markdown fences) with this exact shape:
   "usefulness_score": 1-10,
   "usefulness_reason": "Must mention personal_fit vs profile (what matched / missed) + weakest quality signal"
 }
+
+FIELD ROLES (anti-duplication — critical):
+- main_idea ≠ summary ≠ digest. Each field has a distinct job above.
+- key_ideas = principles (\"B-roll must match speech\"), NOT repeating \"Шаг 1… Шаг 2…\".
+- If SCREEN RESOURCES lists brands, put them in tools and mention ≥2 in digest.
+- Listicle / \"N tips\" without unique numbers/playbook → actionability ≤ 3.
+- links: real URLs mentioned in speech/OCR/screen (or well-known official pages when the material clearly points to them). title in Russian. Prefer objects; bare URL strings also OK. Do NOT put brand names without URLs here — those belong in tools.
+- code_blocks: ONLY when the material includes or clearly dictates copy-pasteable light code (CSS/JS/Python/bash/SQL snippets, short functions, commands). Keep each block ≤ ~40 lines. language must match content. Empty [] when there is no code. Do NOT invent full apps or tutorials not in the source.
 
 QUALITY RUBRIC (rate the 4 quality signals independently of the person):
 3 = typical ok industry tip. usefulness_score is recalibrated server-side from signals + personal_fit.
@@ -254,22 +263,36 @@ class GroqTranscribeClient(TranscribeClient):
         try:
             p = Path(path)
             data = p.read_bytes()
-            # Default Russian — Chronicum archive is RU-first. Explicit prompt reduces
-            # Whisper's habit of censoring / softening swear words.
-            lang = language or "ru"
+            # None → settings.whisper_language; "auto" → let Whisper detect (fixes EN tutorials forced to RU)
+            cfg_lang = (getattr(self.settings, "whisper_language", None) or "auto").strip().lower()
+            lang = (language if language is not None else cfg_lang).strip().lower() or "auto"
             kwargs: dict[str, Any] = {
                 "file": (p.name, data),
                 "model": self.model,
-                "language": lang,
                 "response_format": "verbose_json",
                 "timestamp_granularities": ["segment"],
                 "temperature": 0,
-                "prompt": (
+            }
+            if lang != "auto":
+                kwargs["language"] = lang
+            if lang == "ru":
+                kwargs["prompt"] = (
                     "Транскрипция разговорной русской речи. "
                     "Пиши дословно, сохраняй мат, сленг и междометия. "
-                    "Не цензурируй и не заменяй слова звёздочками или эвфемизмами."
-                ),
-            }
+                    "Не цензурируй и не заменяй слова звёздочками или эвфемизмами. "
+                    "Названия продуктов оставляй как есть: CapCut, overlay, keyframe, opacity."
+                )
+            elif lang == "en":
+                kwargs["prompt"] = (
+                    "Transcribe spoken English faithfully. Keep UI/product terms as CapCut, "
+                    "overlay, keyframe, opacity, layer, timeline, blend."
+                )
+            else:
+                kwargs["prompt"] = (
+                    "Transcribe faithfully in the spoken language. Keep product/UI names: "
+                    "CapCut, overlay, keyframe, opacity, layer, timeline. "
+                    "Do not translate technical UI terms into unrelated words."
+                )
             try:
                 resp = await self.client.audio.transcriptions.create(**kwargs)
             except Exception:
@@ -311,11 +334,16 @@ class GroqTranscribeClient(TranscribeClient):
                 timed_lines.append(f"[{m}:{sec:02d}] {seg.text}")
             text = "\n".join(timed_lines)
 
+        detected = getattr(resp, "language", None)
+        if detected is not None:
+            detected = str(detected).strip().lower() or None
+
         return TranscribeResult(
             text=text,
             audio_seconds=duration,
             provider="groq",
             model=self.model,
+            language=detected,
             segments=segments,
         )
 
@@ -415,6 +443,7 @@ async def analyze_material(
     settings: Settings | None = None,
     session=None,
     personal_profile: dict | None = None,
+    screen_resources: str = "",
 ) -> LLMResult:
     settings = settings or get_settings()
     mode = "brief preview relevance analysis" if preview else "full knowledge card"
@@ -441,10 +470,15 @@ async def analyze_material(
         "Do NOT create new category names. Do NOT assign a category that does not clearly fit the material.\n"
         "Reuse existing tag strings exactly when they fit. "
         "Do not invent spelling variants (CapCut/капкат/cap cut → one tag). "
-        "Always include a crisp digest for lazy readers.\n"
+        "Always include a crisp digest for lazy readers — with tool names when SCREEN RESOURCES exist.\n"
         "Be a strict reviewer on usefulness_signals — generosity and ignoring the personal profile make the archive useless."
     )
-    user = f"Material text:\n\n{raw_text[:120000]}"
+    res_block = (screen_resources or "").strip()
+    user = (
+        f"{res_block}\n\nMaterial text:\n\n{raw_text[:120000]}"
+        if res_block
+        else f"Material text:\n\n{raw_text[:120000]}"
+    )
 
     if session is not None:
         async def _run(client: LLMClient) -> LLMResult:

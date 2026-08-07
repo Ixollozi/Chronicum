@@ -14,6 +14,7 @@ MATERIAL_EXTRA_COLUMNS: dict[str, str] = {
     "ai_opinion_sources": "JSON",
     "ai_opinion_at": "DATETIME",
     "key_moments": "JSON",
+    "code_blocks": "JSON",
 }
 
 
