@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { EB_Garamond, Figtree } from "next/font/google";
 import "./globals.css";
 import { AppShell } from "@/components/AppShell";
@@ -18,6 +18,19 @@ const figtree = Figtree({
 export const metadata: Metadata = {
   title: "Chronicum",
   description: "Персональная база знаний — кабинет материалов",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Chronicum",
+  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#0a0c0b",
+  colorScheme: "dark",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

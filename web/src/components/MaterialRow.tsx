@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { MaterialListItem } from "@/lib/api";
 
 export const STATUS_LABEL: Record<string, string> = {
@@ -77,6 +77,7 @@ export function MaterialRow({
   onToggle?: (id: string) => void;
   forceChecks?: boolean;
 }) {
+  const router = useRouter();
   const score = item.usefulness_score;
   const dateLabel = formatShortDate(item.created_at);
   const source = SOURCE_LABEL[item.source_type] || item.source_type;
@@ -91,6 +92,10 @@ export function MaterialRow({
         active ? "lib-item-active" : ""
       } ${selected ? "lib-item-checked" : ""}`}
       onClick={() => onSelect?.(item.id)}
+      onDoubleClick={(e) => {
+        e.preventDefault();
+        router.push(`/m/${item.id}`);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -119,7 +124,9 @@ export function MaterialRow({
       )}
 
       <span
-        className="w-6 shrink-0 select-none pt-0.5 text-[0.8rem] tabular-nums leading-none text-[color-mix(in_srgb,var(--muted)_55%,transparent)]"
+        className={`w-6 shrink-0 select-none pt-0.5 text-[0.8rem] tabular-nums leading-none text-[color-mix(in_srgb,var(--muted)_55%,transparent)] ${
+          selectable ? "hidden sm:inline-block" : ""
+        }`}
         style={{ fontFamily: "var(--font-display)" }}
         aria-hidden
       >
@@ -162,13 +169,9 @@ export function MaterialRow({
         </p>
       </div>
 
-      {/* Mobile: open full card */}
-      <Link
-        href={`/m/${item.id}`}
-        className="absolute inset-0 z-[1] lg:hidden"
-        aria-label={`Открыть ${item.title || "материал"}`}
-        onClick={(e) => e.stopPropagation()}
-      />
+      <span className="lib-item-chevron lg:hidden" aria-hidden>
+        ›
+      </span>
     </div>
   );
 }

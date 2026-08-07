@@ -12,6 +12,102 @@ const emptyProfile = (): PersonalProfile => ({
   current_priorities: "",
 });
 
+const TABS = [
+  {
+    id: "modes" as const,
+    label: "Режимы",
+    hint: "Глубина и авто",
+    tip: "Как по умолчанию разбирать новые материалы: насколько подробно и нужно ли снимать кадры с видео.",
+  },
+  {
+    id: "context" as const,
+    label: "Контекст",
+    hint: "Кто ты · что важно",
+    tip: "Короткий профиль о тебе. По нему ИИ решает, насколько материал полезен именно тебе (оценка 1–10).",
+  },
+  {
+    id: "keys" as const,
+    label: "Ключи",
+    hint: "Пулы AI",
+    tip: "API-ключи для AI. Groq — основной (быстро), Gemini — запасной, если Groq недоступен.",
+  },
+];
+
+const DEPTHS = [
+  {
+    id: "compact",
+    title: "Compact",
+    desc: "Только выжимка — быстро и коротко.",
+    tip: "Экономит токены и время. Подходит, если материала много и достаточно краткой сути.",
+  },
+  {
+    id: "standard",
+    title: "Standard",
+    desc: "Карточка + выжимка — баланс по умолчанию.",
+    tip: "Обычный режим: заголовок, оценка, выжимка и базовая структура без лишней глубины.",
+  },
+  {
+    id: "detailed",
+    title: "Detailed",
+    desc: "Сразу подробности и оценка.",
+    tip: "Больше контента сразу: пояснения и более развёрнутый разбор. Дороже по AI и дольше.",
+  },
+];
+
+const HORIZONS = [
+  {
+    id: "now",
+    label: "Эта неделя",
+    desc: "Срочное и тактическое",
+    tip: "Выше ценятся советы, которые можно применить сразу. «На будущее» почти не поднимает score.",
+  },
+  {
+    id: "90d",
+    label: "≈ 90 дней",
+    desc: "Текущий квартал",
+    tip: "Баланс: полезно и то, что применимо сейчас, и то, что пригодится в ближайшие месяцы.",
+  },
+  {
+    id: "long",
+    label: "Долгосрок",
+    desc: "Стратегия на годы",
+    tip: "Стратегические и фундаментальные материалы получают больше баллов, даже если не «на завтра».",
+  },
+];
+
+const CONTEXT_FIELDS = {
+  role: {
+    q: "Кем ты себя считаешь в работе?",
+    help: "Роль или позиция — коротко",
+    tip: "Например: «владелец агентства» или «продакт». ИИ понимает, с какой точки зрения смотреть на материал.",
+  },
+  goals: {
+    q: "К каким результатам ты идёшь?",
+    help: "2–5 целей · с новой строки",
+    tip: "Зачем ты копил материалы. Если контент двигает к этим целям — оценка выше.",
+  },
+  focuses: {
+    q: "Что для тебя сейчас «в теме»?",
+    help: "Повышает оценку",
+    tip: "Темы, которые обычно нужны. Совпадение с ними заметно поднимает personal fit и итоговый score.",
+  },
+  anti: {
+    q: "Что почти всегда мимо?",
+    help: "Понижает оценку",
+    tip: "Темы, которые редко бывают полезны. Такие материалы получают ниже score, даже если сами по себе качественные.",
+  },
+  horizon: {
+    q: "На какой срок смотреть полезность?",
+    help: "Как сравнивать «сейчас» и «на потом»",
+    tip: "От этого зависит, хвалить ли срочные хаки или длинные стратегии.",
+  },
+  priorities: {
+    q: "Что важнее всего прямо сейчас?",
+    help: "1–3 приоритета · сильнее всего влияют",
+    tip: "Самый сильный сигнал. Материал, который бьёт в текущие приоритеты, почти всегда в топе оценки.",
+  },
+};
+
 function linesToList(text: string): string[] {
   return text
     .replace(/\r/g, "\n")
@@ -36,8 +132,8 @@ export default function SettingsPage() {
   const [showKeys, setShowKeys] = useState(false);
   const [checkMsg, setCheckMsg] = useState<string | null>(null);
   const [profileSaved, setProfileSaved] = useState<string | null>(null);
+  const [modeFlash, setModeFlash] = useState<string | null>(null);
 
-  // Draft editors for profile lists
   const [role, setRole] = useState("");
   const [goalsText, setGoalsText] = useState("");
   const [focusesText, setFocusesText] = useState("");
@@ -77,13 +173,19 @@ export default function SettingsPage() {
 
   const crmCount = keys.filter((k) => k.source === "crm").length;
   const poolCount = keys.length;
+  const enabledCount = keys.filter((k) => k.enabled).length;
 
-  const profileEmpty =
-    !role.trim() &&
-    !goalsText.trim() &&
-    !focusesText.trim() &&
-    !antiText.trim() &&
-    !priorities.trim();
+  async function patchMode(body: Partial<AppSettings>) {
+    setError(null);
+    try {
+      const next = await client.patchSettings(body);
+      setSettings(next);
+      setModeFlash("Сохранено");
+      window.setTimeout(() => setModeFlash(null), 1400);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось сохранить");
+    }
+  }
 
   async function saveProfile() {
     setBusy(true);
@@ -110,220 +212,332 @@ export default function SettingsPage() {
     }
   }
 
+  const activeTab = TABS.find((t) => t.id === tab)!;
+
   return (
-    <section className="mx-auto max-w-2xl animate-rise">
-      <h1
-        className="text-[clamp(2rem,5vw,2.8rem)] leading-none tracking-[-0.03em]"
-        style={{ fontFamily: "var(--font-display)" }}
-      >
-        {tab === "keys" ? "AI · пулы ключей" : tab === "context" ? "Личный контекст" : "Настройки"}
-      </h1>
-      <p className="mt-3 text-[var(--muted)]">
-        {tab === "context"
-          ? "Оценка полезности калибруется под твои цели и фокусы (±5 к базе)."
-          : "Сначала используется Groq, при исчерпании — Gemini. Ключи из UI и опционально из .env."}
+    <section className="settings-page animate-fade">
+      <header className="settings-hero">
+        <p className="settings-eyebrow">Параметры архива</p>
+        <h1 className="settings-title" style={{ fontFamily: "var(--font-display)" }}>
+          Настройки
+        </h1>
+        <div className="settings-title-rule" />
+        <p className="settings-lede">
+          {tab === "context"
+            ? "Ответь коротко — ИИ будет оценивать материалы именно для тебя, а не «вообще»."
+            : tab === "keys"
+              ? "Сначала Groq, при исчерпании — Gemini. Ключи из UI или .env."
+              : "Глубина разбора, автомоменты и порядок провайдеров."}
+        </p>
+      </header>
+
+      <div className="settings-tabs" role="tablist" aria-label="Разделы настроек">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.id}
+            className="settings-tab settings-hint"
+            data-active={tab === t.id}
+            data-tip={t.tip}
+            onClick={() => {
+              setTab(t.id);
+              setError(null);
+              setCheckMsg(null);
+            }}
+          >
+            <span className="settings-tab-label">{t.label}</span>
+            <span className="settings-tab-hint">{t.hint}</span>
+          </button>
+        ))}
+      </div>
+      <p className="settings-inline-help md:hidden" aria-live="polite">
+        {activeTab.tip || activeTab.hint}
       </p>
 
-      <div className="mt-8 flex flex-wrap gap-2 border-b border-[var(--line)]">
-        <button
-          type="button"
-          onClick={() => setTab("modes")}
-          className={`px-4 py-2 text-sm ${tab === "modes" ? "border-b-2 border-[var(--accent)] text-[var(--accent)]" : "text-[var(--muted)]"}`}
-        >
-          Режимы
-        </button>
-        <button
-          type="button"
-          onClick={() => setTab("context")}
-          className={`px-4 py-2 text-sm ${tab === "context" ? "border-b-2 border-[var(--accent)] text-[var(--accent)]" : "text-[var(--muted)]"}`}
-        >
-          Контекст
-        </button>
-        <button
-          type="button"
-          onClick={() => setTab("keys")}
-          className={`px-4 py-2 text-sm ${tab === "keys" ? "border-b-2 border-[var(--accent)] text-[var(--accent)]" : "text-[var(--muted)]"}`}
-        >
-          Пулы ключей
-        </button>
-      </div>
+      {error && (
+        <p className="settings-alert" role="alert">
+          {error}
+        </p>
+      )}
 
-      {error && <p className="mt-4 text-sm text-[var(--warn)]">{error}</p>}
+      {!settings && tab === "modes" && (
+        <div className="settings-skel">
+          <div className="archive-skeleton h-24 w-full rounded-[var(--radius-xl)]" />
+          <div className="archive-skeleton mt-3 h-24 w-full rounded-[var(--radius-xl)]" />
+          <div className="archive-skeleton mt-3 h-16 w-full rounded-[var(--radius-xl)]" />
+        </div>
+      )}
 
       {tab === "modes" && settings && (
-        <div className="mt-8 space-y-6">
-          <label className="block">
-            <span className="text-sm text-[var(--muted)]">Глубина анализа по умолчанию</span>
-            <select
-              value={settings.default_depth}
-              onChange={async (e) => {
-                const next = await client.patchSettings({ default_depth: e.target.value });
-                setSettings(next);
-              }}
-              className="mt-2 w-full border-b border-[var(--line)] bg-transparent py-2 outline-none"
+        <div className="settings-panel" role="tabpanel" aria-label={activeTab.label}>
+          <div className="settings-section-head">
+            <div>
+              <p className="settings-kicker">Анализ</p>
+              <h2
+                className="settings-section-title settings-hint"
+                data-tip="Выбери, насколько подробно Chronicum разбирает новые ссылки и заметки сразу после сохранения."
+              >
+                Глубина по умолчанию
+              </h2>
+            </div>
+            {modeFlash && <span className="settings-flash">{modeFlash}</span>}
+          </div>
+
+          <div className="settings-depth-grid" role="radiogroup" aria-label="Глубина анализа">
+            {DEPTHS.map((d) => (
+              <button
+                key={d.id}
+                type="button"
+                role="radio"
+                aria-checked={settings.default_depth === d.id}
+                className="settings-choice settings-hint"
+                data-active={settings.default_depth === d.id}
+                data-tip={d.tip}
+                onClick={() => patchMode({ default_depth: d.id })}
+              >
+                <span className="settings-choice-title">{d.title}</span>
+                <span className="settings-choice-desc">{d.desc}</span>
+              </button>
+            ))}
+          </div>
+
+          <div
+            className="settings-toggle-row settings-hint"
+            data-tip="Для YouTube / Instagram / видео ИИ выберет ключевые кадры и сохранит скриншоты. Можно выключить, если нужны только текст и выжимка."
+          >
+            <div>
+              <p className="settings-field-label">Автоскриншоты</p>
+              <p className="settings-field-help">Ключевые кадры для видео снимаются автоматически</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.auto_moments}
+              className="settings-switch"
+              data-on={settings.auto_moments}
+              onClick={() => patchMode({ auto_moments: !settings.auto_moments })}
             >
-              <option value="compact">compact — только выжимка</option>
-              <option value="standard">standard — карточка + выжимка</option>
-              <option value="detailed">detailed — сразу подробности и оценка</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-3 text-sm">
-            <input
-              type="checkbox"
-              checked={settings.auto_moments}
-              onChange={async (e) => {
-                const next = await client.patchSettings({ auto_moments: e.target.checked });
-                setSettings(next);
-              }}
-            />
-            Автоскриншоты ключевых моментов для видео
-          </label>
-          <p className="text-sm text-[var(--muted)]">
-            Порядок провайдеров: {(settings.provider_order || []).join(" → ")}
-          </p>
-          <p className="text-sm text-[var(--muted)]">
-            Личный профиль для оценки — во вкладке{" "}
-            <button type="button" className="text-[var(--accent)] underline" onClick={() => setTab("context")}>
-              Контекст
+              <span className="settings-switch-knob" />
             </button>
-            .
-          </p>
+          </div>
+
+          <div
+            className="settings-info settings-hint"
+            data-tip="В каком порядке Chronicum ходит в AI. Если первый провайдер исчерпал лимит или упал — берётся следующий."
+          >
+            <p className="settings-kicker">Провайдеры</p>
+            <p className="settings-info-text">
+              Порядок:{" "}
+              <strong>{(settings.provider_order || []).join(" → ") || "не задан"}</strong>
+            </p>
+            <p className="settings-field-help mt-2">
+              Личный профиль для оценки — во вкладке{" "}
+              <button type="button" className="settings-inline-link" onClick={() => setTab("context")}>
+                Контекст
+              </button>
+              .
+            </p>
+          </div>
         </div>
       )}
 
       {tab === "context" && (
-        <div className="mt-8 space-y-5">
-          {profileEmpty && (
-            <p className="border border-[var(--line)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--muted)]">
-              Профиль пуст — оценка сейчас нейтральная (как для «среднего» читателя). Заполни, чтобы score
-              учитывал твои цели.
+        <div className="settings-panel" role="tabpanel" aria-label={activeTab.label}>
+          <div
+            className="settings-callout settings-hint"
+            data-tip="Оценка 1–10 считается для тебя: personal fit смотрит на совпадение с целями, темами и приоритетами. Без профиля оценка «средняя», как для случайного читателя."
+          >
+            <p className="settings-kicker">Как это работает</p>
+            <p className="settings-callout-text">
+              Chronicum смотрит на материал глазами твоего профиля: что совпало с интересами —
+              поднимает оценку, что мимо — опускает. Без ответов оценка нейтральная.
             </p>
-          )}
+          </div>
 
-          <label className="block">
-            <span className="text-sm text-[var(--muted)]">Роль</span>
-            <input
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              placeholder="Владелец AI-агентства / продакт / …"
-              className="mt-2 w-full border-b border-[var(--line)] bg-transparent py-2 outline-none"
-            />
-          </label>
+          <div className="settings-form">
+            <label className="settings-field">
+              <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.role.tip}>
+                <span className="settings-q-num">1</span>
+                {CONTEXT_FIELDS.role.q}
+              </span>
+              <span className="settings-field-help">{CONTEXT_FIELDS.role.help}</span>
+              <input
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                placeholder="Например: владелец AI-агентства, продакт, маркетолог…"
+                className="settings-input"
+              />
+            </label>
 
-          <label className="block">
-            <span className="text-sm text-[var(--muted)]">Цели (по строке или через запятую)</span>
-            <textarea
-              value={goalsText}
-              onChange={(e) => setGoalsText(e.target.value)}
-              rows={3}
-              placeholder={"Масштабировать delivery\nЗакрывать сделки\nСистемно копить знания"}
-              className="mt-2 w-full resize-y border border-[var(--line)] bg-transparent p-3 text-sm outline-none focus:border-[var(--accent)]"
-            />
-          </label>
+            <label className="settings-field">
+              <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.goals.tip}>
+                <span className="settings-q-num">2</span>
+                {CONTEXT_FIELDS.goals.q}
+              </span>
+              <span className="settings-field-help">{CONTEXT_FIELDS.goals.help}</span>
+              <textarea
+                value={goalsText}
+                onChange={(e) => setGoalsText(e.target.value)}
+                rows={3}
+                placeholder={"Масштабировать delivery\nЗакрывать сделки\nСобрать личную базу знаний"}
+                className="settings-textarea"
+              />
+            </label>
 
-          <label className="block">
-            <span className="text-sm text-[var(--muted)]">Фокусы — повышают оценку</span>
-            <textarea
-              value={focusesText}
-              onChange={(e) => setFocusesText(e.target.value)}
-              rows={3}
-              placeholder={"AI / LLM\nCapCut / монтаж\nДизайн\nПродажи агентства"}
-              className="mt-2 w-full resize-y border border-[var(--line)] bg-transparent p-3 text-sm outline-none focus:border-[var(--accent)]"
-            />
-          </label>
+            <div className="settings-form-grid">
+              <label className="settings-field">
+                <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.focuses.tip}>
+                  <span className="settings-q-num">3</span>
+                  {CONTEXT_FIELDS.focuses.q}
+                </span>
+                <span className="settings-field-help">{CONTEXT_FIELDS.focuses.help}</span>
+                <textarea
+                  value={focusesText}
+                  onChange={(e) => setFocusesText(e.target.value)}
+                  rows={4}
+                  placeholder={"AI и LLM\nМонтаж Reels / CapCut\nДизайн\nПродажи агентства"}
+                  className="settings-textarea"
+                />
+              </label>
+              <label className="settings-field">
+                <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.anti.tip}>
+                  <span className="settings-q-num">4</span>
+                  {CONTEXT_FIELDS.anti.q}
+                </span>
+                <span className="settings-field-help">{CONTEXT_FIELDS.anti.help}</span>
+                <textarea
+                  value={antiText}
+                  onChange={(e) => setAntiText(e.target.value)}
+                  rows={4}
+                  placeholder={"Крипта\nГеймдев\nСпорт"}
+                  className="settings-textarea"
+                />
+              </label>
+            </div>
 
-          <label className="block">
-            <span className="text-sm text-[var(--muted)]">Анти-фокусы — режут оценку</span>
-            <textarea
-              value={antiText}
-              onChange={(e) => setAntiText(e.target.value)}
-              rows={2}
-              placeholder={"Крипта\nГеймдев\n…"}
-              className="mt-2 w-full resize-y border border-[var(--line)] bg-transparent p-3 text-sm outline-none focus:border-[var(--accent)]"
-            />
-          </label>
+            <div className="settings-field">
+              <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.horizon.tip}>
+                <span className="settings-q-num">5</span>
+                {CONTEXT_FIELDS.horizon.q}
+              </span>
+              <span className="settings-field-help">{CONTEXT_FIELDS.horizon.help}</span>
+              <div className="settings-horizon" role="radiogroup" aria-label="Горизонт применения">
+                {HORIZONS.map((h) => (
+                  <button
+                    key={h.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={horizon === h.id}
+                    className="settings-choice compact settings-hint"
+                    data-active={horizon === h.id}
+                    data-tip={h.tip}
+                    onClick={() => setHorizon(h.id)}
+                  >
+                    <span className="settings-choice-title">{h.label}</span>
+                    <span className="settings-choice-desc">{h.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
 
-          <label className="block">
-            <span className="text-sm text-[var(--muted)]">Горизонт применения</span>
-            <select
-              value={horizon}
-              onChange={(e) => setHorizon(e.target.value)}
-              className="mt-2 w-full border-b border-[var(--line)] bg-transparent py-2 outline-none"
-            >
-              <option value="now">сейчас / эта неделя</option>
-              <option value="90d">~90 дней</option>
-              <option value="long">долгосрочно</option>
-            </select>
-          </label>
+            <label className="settings-field">
+              <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.priorities.tip}>
+                <span className="settings-q-num">6</span>
+                {CONTEXT_FIELDS.priorities.q}
+              </span>
+              <span className="settings-field-help">{CONTEXT_FIELDS.priorities.help}</span>
+              <textarea
+                value={priorities}
+                onChange={(e) => setPriorities(e.target.value)}
+                rows={3}
+                placeholder="Сейчас важнее всего: упаковать офферы, ускорить монтаж Reels, наладить базу знаний…"
+                className="settings-textarea"
+              />
+            </label>
+          </div>
 
-          <label className="block">
-            <span className="text-sm text-[var(--muted)]">Текущие приоритеты (1–3)</span>
-            <textarea
-              value={priorities}
-              onChange={(e) => setPriorities(e.target.value)}
-              rows={3}
-              placeholder="Сейчас важнее всего: упаковать офферы, ускорить монтаж Reels, наладить базу знаний…"
-              className="mt-2 w-full resize-y border border-[var(--line)] bg-transparent p-3 text-sm outline-none focus:border-[var(--accent)]"
-            />
-          </label>
-
-          <div className="flex flex-wrap items-center gap-3 pt-2">
+          <div className="settings-footer">
             <button
               type="button"
               disabled={busy}
               onClick={saveProfile}
-              className="border border-[var(--accent)] bg-[var(--accent)] px-4 py-2 text-sm text-[var(--btn-fg)] disabled:opacity-40"
+              className="settings-btn primary"
             >
-              {busy ? "…" : "Сохранить профиль"}
+              {busy ? "Сохраняю…" : "Сохранить ответы"}
             </button>
-            {profileSaved && <span className="text-sm text-[var(--accent)]">{profileSaved}</span>}
+            {profileSaved && <span className="settings-flash">{profileSaved}</span>}
+            <p
+              className="settings-footnote settings-hint"
+              data-tip="Новый профиль влияет только на свежие разборы. Чтобы пересчитать старый материал, открой карточку и нажми «Повторить» или полную обработку."
+            >
+              Старые карточки сами не пересчитаются. Новый score — на свежих разборах или после
+              «Повторить».
+            </p>
           </div>
-          <p className="text-xs text-[var(--muted)]">
-            Уже сохранённые материалы не пересчитываются сами — только новые разборы / Retry.
-          </p>
         </div>
       )}
 
       {tab === "keys" && (
-        <div className="mt-6">
-          <div className="grid grid-cols-2 gap-2">
+        <div className="settings-panel" role="tabpanel" aria-label={activeTab.label}>
+          <div className="settings-provider-grid" role="tablist" aria-label="Провайдер">
             <button
               type="button"
+              className="settings-choice settings-hint"
+              data-active={provider === "groq"}
+              data-tip="Основной провайдер. Быстрые ответы, обычно идёт первым в очереди. Сюда добавляй ключи вида gsk_…"
               onClick={() => setProvider("groq")}
-              className={`rounded-xl border px-4 py-3 text-left ${
-                provider === "groq"
-                  ? "border-[var(--accent)] bg-[var(--accent-soft)]"
-                  : "border-[var(--line)]"
-              }`}
             >
-              <p className="font-medium">Groq</p>
-              <p className="text-xs text-[var(--muted)]">Основной · быстро</p>
+              <span className="settings-choice-title">Groq</span>
+              <span className="settings-choice-desc">Основной · быстро</span>
             </button>
             <button
               type="button"
+              className="settings-choice settings-hint"
+              data-active={provider === "google"}
+              data-tip="Запасной провайдер. Используется, если Groq недоступен или все его ключи вышли из строя."
               onClick={() => setProvider("google")}
-              className={`rounded-xl border px-4 py-3 text-left ${
-                provider === "google"
-                  ? "border-[var(--accent)] bg-[var(--accent-soft)]"
-                  : "border-[var(--line)]"
-              }`}
             >
-              <p className="font-medium">Gemini</p>
-              <p className="text-xs text-[var(--muted)]">Fallback Google</p>
+              <span className="settings-choice-title">Gemini</span>
+              <span className="settings-choice-desc">Fallback Google</span>
             </button>
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-2">
+          <div className="settings-stats">
+            <span
+              className="settings-stat settings-hint"
+              data-tip="Сколько ключей доступно для выбранного провайдера: и из UI (CRM), и из .env."
+            >
+              В пуле · {poolCount}
+            </span>
+            <span
+              className="settings-stat settings-hint"
+              data-tip="Сколько ключей сейчас включены и могут использоваться для запросов."
+            >
+              Активны · {enabledCount}
+            </span>
+            <span
+              className="settings-stat settings-hint"
+              data-tip="Ключи, добавленные здесь в интерфейсе. Их можно выключать и удалять. Ключи из .env — только для чтения."
+            >
+              CRM · {crmCount}
+            </span>
+          </div>
+
+          <div className="settings-toolbar">
             <button
               type="button"
               disabled={busy}
-              className="border border-[var(--accent)] bg-[var(--accent)] px-3 py-2 text-sm text-[var(--btn-fg)] disabled:opacity-50"
+              className="settings-btn primary settings-hint"
+              data-tip="Пингует каждый ключ в пуле: сколько живых (OK) и сколько с ошибкой (fail)."
               onClick={async () => {
                 setBusy(true);
                 setCheckMsg(null);
+                setError(null);
                 try {
                   const r = await client.checkKeys(provider);
-                  setCheckMsg(`OK: ${r.ok}, fail: ${r.failed}`);
+                  setCheckMsg(`OK ${r.ok} · fail ${r.failed}`);
                   await loadKeys();
                 } catch (e) {
                   setError(e instanceof Error ? e.message : "Ошибка проверки");
@@ -334,38 +548,34 @@ export default function SettingsPage() {
             >
               Проверить {provider === "groq" ? "Groq" : "Gemini"}
             </button>
-            <button
-              type="button"
-              className="border border-[var(--line)] px-3 py-2 text-sm hover:border-[var(--accent)]"
-              onClick={() => loadKeys()}
-            >
+            <button type="button" className="settings-btn" onClick={() => loadKeys()}>
               Обновить
             </button>
-            <span className="text-xs text-[var(--muted)]">
-              В пуле: {poolCount} · CRM: {crmCount}
-            </span>
-            {checkMsg && <span className="text-xs text-[var(--accent)]">{checkMsg}</span>}
+            {checkMsg && <span className="settings-flash">{checkMsg}</span>}
           </div>
 
-          <ul className="mt-6 space-y-2">
+          <ul className="settings-key-list">
             {keys.map((k) => (
-              <li
-                key={String(k.id)}
-                className="flex flex-wrap items-center justify-between gap-3 border border-[var(--line)] bg-[var(--surface)] px-4 py-3"
-              >
-                <div>
-                  <p className="text-sm font-medium">{k.label || "без подписи"}</p>
-                  <p className="text-xs text-[var(--muted)]">
-                    ••••{k.hint} · {k.source}
-                    {k.last_error ? ` · ${k.last_error.slice(0, 40)}` : ""}
+              <li key={String(k.id)} className="settings-key-row" data-disabled={!k.enabled}>
+                <div className="settings-key-main">
+                  <div className="settings-key-topline">
+                    <p className="settings-key-label">{k.label || "без подписи"}</p>
+                    <span className="settings-key-badge" data-source={k.source}>
+                      {k.source === "env" ? ".env" : "CRM"}
+                    </span>
+                    {!k.enabled && <span className="settings-key-badge warn">выкл</span>}
+                  </div>
+                  <p className="settings-key-meta">
+                    ••••{k.hint}
+                    {k.last_error ? ` · ${k.last_error.slice(0, 48)}` : ""}
                   </p>
                 </div>
-                <div className="flex gap-2">
+                <div className="settings-key-actions">
                   {k.source === "crm" && typeof k.id === "number" && (
                     <>
                       <button
                         type="button"
-                        className="border border-[var(--line)] px-2 py-1 text-xs"
+                        className="settings-btn ghost"
                         onClick={async () => {
                           await client.patchKey(k.id as number, { enabled: !k.enabled });
                           await loadKeys();
@@ -375,8 +585,9 @@ export default function SettingsPage() {
                       </button>
                       <button
                         type="button"
-                        className="border border-[var(--line)] px-2 py-1 text-xs text-[var(--warn)]"
+                        className="settings-btn danger"
                         onClick={async () => {
+                          if (!window.confirm("Удалить ключ из пула?")) return;
                           await client.deleteKey(k.id as number);
                           await loadKeys();
                         }}
@@ -386,70 +597,89 @@ export default function SettingsPage() {
                     </>
                   )}
                   {k.source === "env" && (
-                    <span className="text-xs text-[var(--muted)]">из .env</span>
+                    <span className="settings-key-env">только из окружения</span>
                   )}
                 </div>
               </li>
             ))}
             {keys.length === 0 && (
-              <p className="text-sm text-[var(--muted)]">Пул пуст — добавь ключи ниже или в .env</p>
+              <li className="settings-empty">
+                Пул пуст — добавь ключи ниже или пропиши в .env
+              </li>
             )}
           </ul>
 
-          <div className="mt-8 border border-[var(--line)] bg-[var(--surface)] p-4">
-            <h2 className="text-sm font-medium">
-              Добавить ключи {provider === "groq" ? "Groq" : "Gemini"}
-            </h2>
-            <p className="mt-1 text-xs text-[var(--muted)]">
-              Один или несколько через Enter / запятую. Полный ключ после сохранения не показывается.
+          <div className="settings-add">
+            <div className="settings-section-head">
+              <div>
+                <p className="settings-kicker">Добавить</p>
+                <h2
+                  className="settings-section-title settings-hint"
+                  data-tip="Можно вставить несколько ключей сразу — каждый с новой строки или через запятую. После сохранения полный ключ больше не показывается, только хвост ••••."
+                >
+                  Ключи {provider === "groq" ? "Groq" : "Gemini"}
+                </h2>
+              </div>
+            </div>
+            <p className="settings-field-help">
+              Один или несколько через Enter / запятую. Полный ключ после сохранения не
+              показывается.
             </p>
+
             <input
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               placeholder="Подпись (необязательно)"
-              className="mt-4 w-full border-b border-[var(--line)] bg-transparent py-2 text-sm outline-none"
+              className="settings-input mt-4"
             />
-            <div className="relative mt-3">
+
+            <div className="settings-secret mt-3">
               <textarea
                 value={keysBlob}
                 onChange={(e) => setKeysBlob(e.target.value)}
                 rows={3}
                 placeholder={provider === "groq" ? "gsk_..." : "AIza..."}
-                className="w-full resize-y border border-[var(--line)] bg-transparent p-3 text-sm outline-none focus:border-[var(--accent)]"
+                className="settings-textarea"
                 style={showKeys ? undefined : ({ WebkitTextSecurity: "disc" } as React.CSSProperties)}
               />
               <button
                 type="button"
-                className="absolute right-2 top-2 text-xs text-[var(--muted)]"
+                className="settings-secret-toggle"
                 onClick={() => setShowKeys((v) => !v)}
               >
-                {showKeys ? "скрыть" : "показать"}
+                {showKeys ? "Скрыть" : "Показать"}
               </button>
             </div>
-            <button
-              type="button"
-              disabled={busy || !keysBlob.trim()}
-              className="mt-4 border border-[var(--accent)] bg-[var(--accent)] px-4 py-2 text-sm text-[var(--btn-fg)] disabled:opacity-40"
-              onClick={async () => {
-                setBusy(true);
-                setError(null);
-                try {
-                  await client.addKeys(provider, keysBlob, label || undefined);
-                  setKeysBlob("");
-                  setLabel("");
-                  await loadKeys();
-                } catch (e) {
-                  setError(e instanceof Error ? e.message : "Ошибка");
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              + Добавить в пул
-            </button>
-            <p className="mt-3 text-xs text-[var(--muted)]">
+
+            <div className="settings-toolbar mt-4">
+              <button
+                type="button"
+                disabled={busy || !keysBlob.trim()}
+                className="settings-btn primary"
+                onClick={async () => {
+                  setBusy(true);
+                  setError(null);
+                  try {
+                    await client.addKeys(provider, keysBlob, label || undefined);
+                    setKeysBlob("");
+                    setLabel("");
+                    await loadKeys();
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : "Ошибка");
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                + Добавить в пул
+              </button>
               {provider === "groq" ? (
-                <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-[var(--accent)]">
+                <a
+                  href="https://console.groq.com/keys"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="settings-inline-link"
+                >
                   console.groq.com → Keys
                 </a>
               ) : (
@@ -457,12 +687,12 @@ export default function SettingsPage() {
                   href="https://aistudio.google.com/apikey"
                   target="_blank"
                   rel="noreferrer"
-                  className="text-[var(--accent)]"
+                  className="settings-inline-link"
                 >
                   Google AI Studio → API key
                 </a>
               )}
-            </p>
+            </div>
           </div>
         </div>
       )}

@@ -71,6 +71,9 @@ export default function GraphPage() {
   const lastClickRef = useRef<{ id: string; t: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const posRef = useRef(new Map<string, { x: number; y: number; vx?: number; vy?: number }>());
+  const forcesInited = useRef(false);
+  const prevFilterKey = useRef("");
+  const [layoutReady, setLayoutReady] = useState(false);
 
   const [raw, setRaw] = useState<GraphPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -84,13 +87,27 @@ export default function GraphPage() {
   const [minScore, setMinScore] = useState(0);
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
   const [forcesReady, setForcesReady] = useState(0);
+  const [allowDrag, setAllowDrag] = useState(true);
 
   const load = useCallback(async () => {
     try {
       const g = await client.graph();
-      setRaw(g);
+      // Clone so force-graph cannot mutate payload links/nodes in place
+      setRaw({
+        nodes: g.nodes.map((n) => ({ ...n })),
+        links: g.links.map((l) => ({
+          source: typeof l.source === "string" ? l.source : String(l.source),
+          target: typeof l.target === "string" ? l.target : String(l.target),
+          reason: l.reason,
+          weight: l.weight,
+        })),
+      });
       setError(null);
       fittedRef.current = false;
+      forcesInited.current = false;
+      setLayoutReady(false);
+      posRef.current.clear();
+      prevFilterKey.current = "";
     } catch (e) {
       setError(e instanceof Error ? e.message : "Ошибка графа");
     }
@@ -109,6 +126,14 @@ export default function GraphPage() {
     return () => window.removeEventListener("resize", measure);
   }, []);
 
+  useEffect(() => {
+    const mq = window.matchMedia("(pointer: fine)");
+    const sync = () => setAllowDrag(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
+
   const nodeById = useMemo(() => {
     const m = new Map<string, GraphPayload["nodes"][number]>();
     if (!raw) return m;
@@ -120,10 +145,11 @@ export default function GraphPage() {
     const map = new Map<string, Set<string>>();
     if (!raw) return map;
     for (const l of raw.links) {
-      if (!map.has(l.source)) map.set(l.source, new Set());
-      if (!map.has(l.target)) map.set(l.target, new Set());
-      map.get(l.source)!.add(l.target);
-      map.get(l.target)!.add(l.source);
+      const [s, t] = linkEnds(l as GLink);
+      if (!map.has(s)) map.set(s, new Set());
+      if (!map.has(t)) map.set(t, new Set());
+      map.get(s)!.add(t);
+      map.get(t)!.add(s);
     }
     return map;
   }, [raw]);
@@ -141,88 +167,83 @@ export default function GraphPage() {
     [raw]
   );
 
-  const filtered = useMemo(() => {
+  // Stable topology — filters never add/remove nodes from the simulation
+  const graphData = useMemo(() => {
     if (!raw) return { nodes: [] as GNode[], links: [] as GLink[] };
-    const qLower = q.trim().toLowerCase();
 
-    const pass = (n: GraphPayload["nodes"][number]) => {
-      if (n.type === "material") {
-        if (minScore > 0 && (n.score ?? 0) < minScore) return false;
-        if (category && (n.category || "").toLowerCase() !== category.toLowerCase()) return false;
-        if (tag && !(n.tags || []).some((t) => t.toLowerCase() === tag.toLowerCase())) return false;
-        if (
-          qLower &&
-          !n.title.toLowerCase().includes(qLower) &&
-          !(n.summary || "").toLowerCase().includes(qLower)
-        ) {
-          return false;
-        }
-        return true;
+    const nodes: GNode[] = raw.nodes.map((n) => {
+      const val = isTopic(n) ? 8 + Math.min(16, n.degree) : 2 + Math.min(6, n.degree);
+      return { ...n, val };
+    });
+
+    const ids = new Set(nodes.map((n) => n.id));
+    const links: GLink[] = [];
+    for (const l of raw.links) {
+      const [s, t] = linkEnds(l as GLink);
+      if (!ids.has(s) || !ids.has(t)) continue;
+      const a = nodeById.get(s);
+      const b = nodeById.get(t);
+      if (!a || !b) continue;
+      if (a.type === "material" || b.type === "material") {
+        links.push({ source: s, target: t, reason: l.reason, weight: l.weight });
+        continue;
       }
-      if (!isTopic(n)) return false;
-      if (category && n.type === "category" && n.title.toLowerCase() !== category.toLowerCase()) return false;
-      if (tag && n.type === "tag" && n.title.toLowerCase() !== tag.toLowerCase()) return false;
-      if (qLower && !n.title.toLowerCase().includes(qLower)) return false;
-      return true;
-    };
+      if (isTopic(a) && isTopic(b) && (l.reason === "belongs" || l.reason === "cooccur")) {
+        links.push({ source: s, target: t, reason: l.reason, weight: l.weight });
+      }
+    }
+
+    return { nodes, links };
+  }, [raw, nodeById]);
+
+  // Visibility only — layout coords stay put when filters change
+  const visibleIds = useMemo(() => {
+    if (!raw) return new Set<string>();
+    const qLower = q.trim().toLowerCase();
+    const filtering = Boolean(qLower || category || tag || minScore);
+    if (!filtering) return new Set(raw.nodes.map((n) => n.id));
 
     const keep = new Set<string>();
     for (const n of raw.nodes) {
-      if (pass(n)) keep.add(n.id);
+      if (n.type !== "material") continue;
+      if (minScore > 0 && (n.score ?? 0) < minScore) continue;
+      if (category && (n.category || "").toLowerCase() !== category.toLowerCase()) continue;
+      if (tag && !(n.tags || []).some((t) => t.toLowerCase() === tag.toLowerCase())) continue;
+      if (
+        qLower &&
+        !n.title.toLowerCase().includes(qLower) &&
+        !(n.summary || "").toLowerCase().includes(qLower)
+      ) {
+        continue;
+      }
+      keep.add(n.id);
     }
-    // Always keep topic neighbors of kept materials so spokes remain
     for (const id of [...keep]) {
-      const n = nodeById.get(id);
-      if (!n || n.type !== "material") continue;
       for (const nb of adjacency.get(id) || []) {
         const tn = nodeById.get(nb);
         if (tn && isTopic(tn)) keep.add(nb);
       }
     }
-
+    if (qLower) {
+      for (const n of raw.nodes) {
+        if (isTopic(n) && n.title.toLowerCase().includes(qLower)) keep.add(n.id);
+      }
+    }
     if (category) keep.add(`cat:${category.toLowerCase()}`);
     if (tag) keep.add(`tag:${tag.toLowerCase()}`);
-
-    const nodes: GNode[] = raw.nodes
-      .filter((n) => keep.has(n.id))
-      .map((n) => {
-        const prev = posRef.current.get(n.id);
-        const val = isTopic(n) ? 8 + Math.min(16, n.degree) : 2 + Math.min(6, n.degree);
-        if (!prev) return { ...n, val };
-        return {
-          ...n,
-          val,
-          x: prev.x,
-          y: prev.y,
-          vx: prev.vx ?? 0,
-          vy: prev.vy ?? 0,
-        };
-      });
-
-    const ids = new Set(nodes.map((n) => n.id));
-    const links: GLink[] = raw.links.filter((l) => {
-      if (!ids.has(l.source) || !ids.has(l.target)) return false;
-      const a = nodeById.get(l.source);
-      const b = nodeById.get(l.target);
-      if (!a || !b) return false;
-      // materials ↔ topics
-      if (a.type === "material" || b.type === "material") return true;
-      // topic constellation: belongs + cooccur only (no dense clique noise)
-      if (isTopic(a) && isTopic(b)) return l.reason === "belongs" || l.reason === "cooccur";
-      return false;
-    });
-
-    return { nodes, links };
+    return keep;
   }, [raw, q, category, tag, minScore, adjacency, nodeById]);
+
+  const isFiltered = visibleIds.size < graphData.nodes.length;
+  const filterKey = `${q}|${category}|${tag}|${minScore}`;
 
   useEffect(() => {
     const fg = fgRef.current;
-    if (!fg || filtered.nodes.length === 0) return;
+    if (!fg || graphData.nodes.length === 0) return;
 
     const charge = fg.d3Force("charge");
     if (charge?.strength) {
       charge.strength((node: GNode) => {
-        // Weaker hub repulsion → clusters sit closer instead of flying to corners
         if (node.type === "category") return -160;
         if (node.type === "tag") return -90;
         return -40;
@@ -251,22 +272,62 @@ export default function GraphPage() {
       forceCollide((n: GNode) => nodeRadius(n) + (isTopic(n) ? 6 : 3)).strength(0.9)
     );
 
-    // Pull the whole map toward the center so main hubs don't drift into voids
     const center = fg.d3Force("center");
     if (center?.strength) center.strength(0.08);
 
-    // Keep the graph alive — reheating is what makes nodes move after data/filter changes
-    fg.d3ReheatSimulation?.();
-  }, [filtered.nodes.length, filtered.links.length, forcesReady, nodeById]);
+    if (!forcesInited.current) {
+      forcesInited.current = true;
+      fg.d3ReheatSimulation?.();
+    }
+  }, [graphData.nodes.length, graphData.links.length, forcesReady, nodeById]);
+
+  function zoomToVisible(ms = 420) {
+    const fg = fgRef.current;
+    if (!fg) return;
+    const pts = graphData.nodes.filter((n) => visibleIds.has(n.id) && n.x != null && n.y != null);
+    if (pts.length === 0) return;
+    if (!isFiltered) {
+      fg.zoomToFit?.(ms, 100);
+      return;
+    }
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const n of pts) {
+      minX = Math.min(minX, n.x!);
+      maxX = Math.max(maxX, n.x!);
+      minY = Math.min(minY, n.y!);
+      maxY = Math.max(maxY, n.y!);
+    }
+    const pad = 80;
+    const w = Math.max(40, maxX - minX + pad * 2);
+    const h = Math.max(40, maxY - minY + pad * 2);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const zoom = Math.min(size.w / w, size.h / h, 3.2);
+    fg.centerAt(cx, cy, ms);
+    fg.zoom(Math.max(0.45, zoom), ms);
+  }
+
+  // Soft camera frame when filters change — never reheat
+  useEffect(() => {
+    if (prevFilterKey.current === filterKey) return;
+    prevFilterKey.current = filterKey;
+    if (!layoutReady || graphData.nodes.length === 0) return;
+    const t = window.setTimeout(() => zoomToVisible(420), 40);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on filter identity
+  }, [filterKey, layoutReady]);
 
   const hoverSet = useMemo(() => {
     if (!hover) return null;
     const set = new Set<string>([hover.id]);
     for (const id of adjacency.get(hover.id) || []) {
-      if (filtered.nodes.some((n) => n.id === id)) set.add(id);
+      if (visibleIds.has(id)) set.add(id);
     }
     return set;
-  }, [hover, adjacency, filtered.nodes]);
+  }, [hover, adjacency, visibleIds]);
 
   const neighborsOfSheet = useMemo(() => {
     if (!sheet || !raw) return [];
@@ -285,7 +346,7 @@ export default function GraphPage() {
 
   function zoomToFit() {
     fittedRef.current = true;
-    fgRef.current?.zoomToFit?.(700, 90);
+    zoomToVisible(700);
   }
 
   function cameraTo(node: GNode, zoom: number, ms = 550) {
@@ -319,7 +380,8 @@ export default function GraphPage() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  const empty = raw && filtered.nodes.length === 0;
+  const empty = raw && graphData.nodes.length === 0;
+  const noMatches = Boolean(raw && graphData.nodes.length > 0 && visibleIds.size === 0);
   const activeFilters = Boolean(q || category || tag || minScore);
 
   return (
@@ -349,29 +411,35 @@ export default function GraphPage() {
             ref={fgRef}
             width={size.w}
             height={size.h}
-            graphData={filtered}
+            graphData={graphData}
             backgroundColor="#000000"
             nodeRelSize={3}
-            warmupTicks={60}
-            cooldownTicks={180}
+            warmupTicks={0}
+            cooldownTicks={220}
             d3AlphaDecay={0.022}
             d3VelocityDecay={0.28}
-            enableNodeDrag
+            enableNodeDrag={allowDrag}
             onEngineStop={() => {
-              if (!fittedRef.current && filtered.nodes.length > 0) {
+              if (!layoutReady) setLayoutReady(true);
+              if (!fittedRef.current && graphData.nodes.length > 0) {
                 fittedRef.current = true;
                 fgRef.current?.zoomToFit(750, 90);
               }
             }}
             onRenderFramePost={() => {
               if (forcesReady === 0 && fgRef.current) setForcesReady(1);
-              for (const n of filtered.nodes) {
+              for (const n of graphData.nodes) {
                 if (n.x == null || n.y == null) continue;
                 posRef.current.set(n.id, { x: n.x, y: n.y, vx: n.vx, vy: n.vy });
               }
             }}
+            linkVisibility={(l: GLink) => {
+              const [a, b] = linkEnds(l);
+              return visibleIds.has(a) && visibleIds.has(b);
+            }}
             linkColor={(l: GLink) => {
               const [a, b] = linkEnds(l);
+              if (!visibleIds.has(a) || !visibleIds.has(b)) return "rgba(0,0,0,0)";
               const lit = !hoverSet || (hoverSet.has(a) && hoverSet.has(b));
               if (hoverSet && !lit) return "rgba(255,255,255,0.03)";
               if (hoverSet && lit) return "rgba(255,255,255,0.55)";
@@ -383,11 +451,21 @@ export default function GraphPage() {
               if (hoverSet && hoverSet.has(a) && hoverSet.has(b)) return 1.2;
               return l.reason === "belongs" ? 0.8 : 0.4;
             }}
-            onNodeHover={(n: GNode | null) => setHover(n || null)}
-            onNodeClick={(n: GNode) => selectNode(n)}
+            onNodeHover={(n: GNode | null) => {
+              if (n && !visibleIds.has(n.id)) {
+                setHover(null);
+                return;
+              }
+              setHover(n || null);
+            }}
+            onNodeClick={(n: GNode) => {
+              if (!visibleIds.has(n.id)) return;
+              selectNode(n);
+            }}
             onBackgroundClick={() => setSheet(null)}
             nodeCanvasObject={(node: GNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
               const n = node;
+              if (!visibleIds.has(n.id)) return;
               const r = nodeRadius(n);
               const hot = hover?.id === n.id || sheet?.id === n.id;
               const topic = isTopic(n);
@@ -431,6 +509,7 @@ export default function GraphPage() {
               ctx.globalAlpha = 1;
             }}
             nodePointerAreaPaint={(node: GNode, color: string, ctx: CanvasRenderingContext2D) => {
+              if (!visibleIds.has(node.id)) return;
               const r = nodeRadius(node) + 7;
               ctx.beginPath();
               ctx.arc(node.x || 0, node.y || 0, r, 0, 2 * Math.PI);
@@ -440,9 +519,17 @@ export default function GraphPage() {
           />
         )}
 
+        {noMatches && (
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
+            <p className="rounded-lg border border-white/10 bg-black/70 px-4 py-2 text-sm text-white/70 backdrop-blur-md">
+              Нет совпадений
+            </p>
+          </div>
+        )}
+
         {hover && !sheet && (
           <div
-            className="pointer-events-none absolute z-30 w-[min(220px,70vw)] rounded-md border border-white/10 bg-black/85 px-3 py-2 shadow-xl"
+            className="graph-hover-tip pointer-events-none absolute z-30 w-[min(220px,70vw)] rounded-md border border-white/10 bg-black/85 px-3 py-2 shadow-xl"
             style={clampTooltip(pointer.x, pointer.y, size.w, size.h)}
           >
             <p className="text-[13px] font-medium leading-snug text-white">{hover.title}</p>
@@ -455,24 +542,27 @@ export default function GraphPage() {
         )}
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 p-3 md:p-4 md:pr-52">
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 p-3 pt-[max(0.75rem,env(safe-area-inset-top))] md:p-4 md:pt-4 md:pr-52">
         <div className="pointer-events-auto flex max-w-md flex-col gap-2">
           <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/55 px-3 py-1.5 backdrop-blur-md">
             <input
               value={q}
-              onChange={(e) => {
-                setQ(e.target.value);
-                fittedRef.current = false;
-              }}
+              onChange={(e) => setQ(e.target.value)}
               placeholder="Поиск…"
-              className="min-w-0 flex-1 bg-transparent py-1.5 text-sm text-white outline-none placeholder:text-white/35"
+              className="min-w-0 flex-1 bg-transparent py-1.5 text-base text-white outline-none placeholder:text-white/35 md:text-sm"
             />
             <button
               type="button"
               onClick={() => setFiltersOpen((v) => !v)}
-              className={`text-xs ${filtersOpen || activeFilters ? "text-[var(--accent)]" : "text-white/45"}`}
+              aria-expanded={filtersOpen}
+              aria-label="Фильтры"
+              className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                filtersOpen || activeFilters
+                  ? "bg-[var(--accent)] text-[var(--btn-fg)]"
+                  : "bg-white/12 text-white/90 hover:bg-white/20"
+              }`}
             >
-              ···
+              Фильтры{activeFilters ? " ·" : ""}
             </button>
           </div>
           {filtersOpen && (
@@ -517,69 +607,89 @@ export default function GraphPage() {
       </div>
 
       {sheet && (
-        <button
-          type="button"
-          onClick={() => clearSelection()}
-          className={`absolute left-4 z-40 rounded-full bg-white px-5 py-2.5 text-sm font-medium text-black shadow-lg transition hover:bg-white/90 active:scale-[0.98] md:left-6 md:px-6 md:py-3 md:text-base ${
-            sheet ? "bottom-[calc(46dvh+0.75rem)] md:bottom-8" : "bottom-24 md:bottom-8"
-          }`}
-        >
-          ← Ко всем
-        </button>
-      )}
-
-      {sheet && (
-        <aside className="absolute bottom-20 left-0 right-0 z-30 mx-auto max-h-[46dvh] w-full overflow-y-auto border-t border-white/10 bg-black/90 px-4 py-4 backdrop-blur-md md:bottom-6 md:left-auto md:right-4 md:max-h-[70dvh] md:w-[320px] md:rounded-xl md:border">
-          <div className="mb-3 flex items-start justify-between gap-3">
-            <div>
-              <p className="text-[10px] uppercase tracking-[0.2em] text-white/40">
-                {sheet.type === "material" ? sheet.source_type : sheet.type === "category" ? "категория" : "тег"}
-              </p>
-              <h2 className="mt-1 text-xl text-white" style={{ fontFamily: "var(--font-display)" }}>
-                {sheet.title}
-              </h2>
-            </div>
-            <button type="button" className="text-white/50" onClick={() => setSheet(null)}>
-              ✕
-            </button>
-          </div>
-
-          {sheet.type === "material" ? (
-            <>
-              <p className="text-sm text-white/50">
-                {sheet.category || "без категории"} · score {sheet.score ?? "—"}
-              </p>
-              {sheet.summary && <p className="mt-3 text-sm text-white/80 line-clamp-5">{sheet.summary}</p>}
+        <aside className="graph-sheet absolute bottom-[var(--app-tabbar-h)] left-0 right-0 z-30 mx-auto flex max-h-[min(52dvh,28rem)] w-full flex-col md:bottom-6 md:left-auto md:right-4 md:max-h-[70dvh] md:w-[340px]">
+          <div className="graph-sheet-panel flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="graph-sheet-handle md:hidden" aria-hidden />
+            <div className="graph-sheet-bar">
               <button
                 type="button"
-                className="mt-5 w-full border border-[var(--accent)] bg-[var(--accent)] px-4 py-2.5 text-sm text-[var(--btn-fg)]"
-                onClick={() => router.push(`/m/${sheet.id}`)}
+                className="graph-sheet-icon"
+                aria-label="Ко всем"
+                title="Ко всем"
+                onClick={() => clearSelection()}
               >
-                Открыть материал
+                ✕
               </button>
-            </>
-          ) : (
-            <>
-              <p className="text-sm text-white/50">{neighborsOfSheet.length} материалов</p>
-              <ul className="mt-3 space-y-2">
-                {neighborsOfSheet.slice(0, 14).map((n) => (
-                  <li key={n.id}>
-                    <button
-                      type="button"
-                      className="w-full border-b border-white/10 py-2 text-left text-sm text-white/85 hover:text-[var(--accent)]"
-                      onClick={() => {
-                        const node = filtered.nodes.find((x) => x.id === n.id);
-                        if (node) selectNode(node);
-                        else setSheet(n as GNode);
-                      }}
-                    >
-                      {n.title}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
+              <div className="graph-sheet-center">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-white/40">
+                  {sheet.type === "material"
+                    ? sheet.source_type
+                    : sheet.type === "category"
+                      ? "категория"
+                      : "тег"}
+                </p>
+                <h2
+                  className="mt-0.5 line-clamp-2 text-base leading-snug text-white md:text-lg"
+                  style={{ fontFamily: "var(--font-display)" }}
+                >
+                  {sheet.title}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSheet(null)}
+                className="graph-sheet-back"
+              >
+                ← Назад
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+              {sheet.type === "material" ? (
+                <>
+                  <p className="text-sm text-white/50">
+                    {sheet.category || "без категории"}
+                    <span className="mx-1.5 opacity-40">·</span>
+                    score {sheet.score ?? "—"}
+                  </p>
+                  {sheet.summary && (
+                    <p className="mt-3 text-sm leading-relaxed text-white/80 line-clamp-6">{sheet.summary}</p>
+                  )}
+                  <button
+                    type="button"
+                    className="mt-5 w-full rounded-full border border-[var(--accent)] bg-[var(--accent)] px-4 py-3 text-sm font-medium text-[var(--btn-fg)] transition hover:brightness-110"
+                    onClick={() => router.push(`/m/${sheet.id}`)}
+                  >
+                    Открыть материал
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-white/50">{neighborsOfSheet.length} материалов</p>
+                  <ul className="mt-3 space-y-1">
+                    {neighborsOfSheet.slice(0, 14).map((n) => (
+                      <li key={n.id}>
+                        <button
+                          type="button"
+                          className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-white/85 transition hover:bg-white/8 hover:text-white"
+                          onClick={() => {
+                            const node = graphData.nodes.find((x) => x.id === n.id);
+                            if (node) selectNode(node);
+                            else setSheet(n as GNode);
+                          }}
+                        >
+                          <span className="min-w-0 line-clamp-2">{n.title}</span>
+                          <span className="shrink-0 text-white/35" aria-hidden>
+                            ›
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          </div>
         </aside>
       )}
     </section>
