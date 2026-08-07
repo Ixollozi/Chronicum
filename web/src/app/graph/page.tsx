@@ -5,7 +5,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraphCanvas from "@/components/ForceGraphCanvas";
+import { FancySelect } from "@/components/FancySelect";
 import { client, type GraphPayload } from "@/lib/api";
+import { nodeTypeLabel, searchGraphNodes } from "@/lib/graphSearch";
 
 type GNode = GraphPayload["nodes"][number] & {
   x?: number;
@@ -82,12 +84,16 @@ export default function GraphPage() {
   const [q, setQ] = useState("");
   const [sheet, setSheet] = useState<GNode | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchWrapRef = useRef<HTMLDivElement>(null);
+  const focusDoneRef = useRef<string | null>(null);
   const [category, setCategory] = useState("");
   const [tag, setTag] = useState("");
   const [minScore, setMinScore] = useState(0);
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
   const [forcesReady, setForcesReady] = useState(0);
-  const [allowDrag, setAllowDrag] = useState(true);
+  const [coarsePointer, setCoarsePointer] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -127,8 +133,8 @@ export default function GraphPage() {
   }, []);
 
   useEffect(() => {
-    const mq = window.matchMedia("(pointer: fine)");
-    const sync = () => setAllowDrag(mq.matches);
+    const mq = window.matchMedia("(pointer: coarse)");
+    const sync = () => setCoarsePointer(mq.matches);
     sync();
     mq.addEventListener("change", sync);
     return () => mq.removeEventListener("change", sync);
@@ -367,6 +373,51 @@ export default function GraphPage() {
     cameraTo(n, isTopic(n) ? 1.85 : 2.35, 550);
   }
 
+  function focusSearch(query = "") {
+    setFiltersOpen(false);
+    if (query) setQ(query);
+    setSearchOpen(true);
+    window.requestAnimationFrame(() => {
+      const el = searchInputRef.current;
+      if (!el) return;
+      el.focus();
+      if (query) {
+        const len = el.value.length;
+        el.setSelectionRange(len, len);
+      }
+    });
+  }
+
+  const searchHits = useMemo(
+    () => (searchOpen && q.trim() ? searchGraphNodes(graphData.nodes, q, 8) : []),
+    [searchOpen, q, graphData.nodes]
+  );
+
+  // Deep-link: /graph?focus=<nodeId>
+  useEffect(() => {
+    if (!layoutReady || !raw) return;
+    const id = new URLSearchParams(window.location.search).get("focus");
+    if (!id || focusDoneRef.current === id) return;
+    const node = graphData.nodes.find((n) => n.id === id);
+    if (!node) return;
+    focusDoneRef.current = id;
+    // Wait a tick so coords exist after layout
+    const t = window.setTimeout(() => selectNode(node), 80);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run when layout/raw ready for a given focus id
+  }, [layoutReady, raw, graphData.nodes]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    function onPointer(e: MouseEvent) {
+      const t = e.target as Node;
+      if (searchWrapRef.current?.contains(t)) return;
+      setSearchOpen(false);
+    }
+    document.addEventListener("mousedown", onPointer);
+    return () => document.removeEventListener("mousedown", onPointer);
+  }, [searchOpen]);
+
   function clearSelection() {
     setSheet(null);
     zoomToFit();
@@ -388,7 +439,7 @@ export default function GraphPage() {
     <section className="fixed inset-0 z-0 bg-[#000000]">
       <div
         ref={stageRef}
-        className="absolute inset-0"
+        className="graph-stage absolute inset-0"
         onMouseMove={(e) => {
           const rect = stageRef.current?.getBoundingClientRect();
           if (!rect) return;
@@ -418,7 +469,8 @@ export default function GraphPage() {
             cooldownTicks={220}
             d3AlphaDecay={0.022}
             d3VelocityDecay={0.28}
-            enableNodeDrag={allowDrag}
+            enableNodeDrag
+            enablePointerInteraction
             onEngineStop={() => {
               if (!layoutReady) setLayoutReady(true);
               if (!fittedRef.current && graphData.nodes.length > 0) {
@@ -510,7 +562,8 @@ export default function GraphPage() {
             }}
             nodePointerAreaPaint={(node: GNode, color: string, ctx: CanvasRenderingContext2D) => {
               if (!visibleIds.has(node.id)) return;
-              const r = nodeRadius(node) + 7;
+              // Larger hit target on touch so a finger can grab a node reliably
+              const r = nodeRadius(node) + (coarsePointer ? 14 : 7);
               ctx.beginPath();
               ctx.arc(node.x || 0, node.y || 0, r, 0, 2 * Math.PI);
               ctx.fillStyle = color;
@@ -544,63 +597,136 @@ export default function GraphPage() {
 
       <div className="pointer-events-none absolute inset-x-0 top-0 z-20 p-3 pt-[max(0.75rem,env(safe-area-inset-top))] md:p-4 md:pt-4 md:pr-52">
         <div className="pointer-events-auto flex max-w-md flex-col gap-2">
-          <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/55 px-3 py-1.5 backdrop-blur-md">
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Поиск…"
-              className="min-w-0 flex-1 bg-transparent py-1.5 text-base text-white outline-none placeholder:text-white/35 md:text-sm"
-            />
-            <button
-              type="button"
-              onClick={() => setFiltersOpen((v) => !v)}
-              aria-expanded={filtersOpen}
-              aria-label="Фильтры"
-              className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                filtersOpen || activeFilters
-                  ? "bg-[var(--accent)] text-[var(--btn-fg)]"
-                  : "bg-white/12 text-white/90 hover:bg-white/20"
-              }`}
-            >
-              Фильтры{activeFilters ? " ·" : ""}
-            </button>
+          <div ref={searchWrapRef} className="relative">
+            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/55 px-3 py-1.5 backdrop-blur-md">
+              <input
+                ref={searchInputRef}
+                value={q}
+                onChange={(e) => {
+                  setQ(e.target.value);
+                  setSearchOpen(true);
+                }}
+                onFocus={() => setSearchOpen(true)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setSearchOpen(false);
+                    (e.target as HTMLInputElement).blur();
+                  } else if (e.key === "Enter" && searchHits[0]) {
+                    e.preventDefault();
+                    selectNode(searchHits[0]);
+                    setSearchOpen(false);
+                  }
+                }}
+                placeholder="Категория, тег или материал…"
+                className="min-w-0 flex-1 bg-transparent py-1.5 text-base text-white outline-none placeholder:text-white/35 md:text-sm"
+              />
+              <button
+                type="button"
+                onClick={() => setFiltersOpen((v) => !v)}
+                aria-expanded={filtersOpen}
+                aria-label="Фильтры"
+                className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                  filtersOpen || activeFilters
+                    ? "bg-[var(--accent)] text-[var(--btn-fg)]"
+                    : "bg-white/12 text-white/90 hover:bg-white/20"
+                }`}
+              >
+                Фильтры{activeFilters ? " ·" : ""}
+              </button>
+            </div>
+            {searchOpen && searchHits.length > 0 && (
+              <ul className="graph-search-hits" role="listbox" aria-label="Результаты поиска">
+                {searchHits.map((hit) => (
+                  <li key={hit.id}>
+                    <button
+                      type="button"
+                      role="option"
+                      className="graph-search-hit"
+                      onClick={() => {
+                        selectNode(hit);
+                        setQ(hit.title);
+                        setSearchOpen(false);
+                      }}
+                    >
+                      <span className="graph-search-hit-title">{hit.title}</span>
+                      <span className="graph-search-hit-type">{nodeTypeLabel(hit.type)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
           {filtersOpen && (
-            <div className="flex flex-wrap gap-2 rounded-xl border border-white/10 bg-black/70 p-3 backdrop-blur-md">
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="rounded-md border border-white/10 bg-transparent px-2 py-1.5 text-sm text-white"
-              >
-                <option value="">Категория</option>
-                {categories.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={tag}
-                onChange={(e) => setTag(e.target.value)}
-                className="rounded-md border border-white/10 bg-transparent px-2 py-1.5 text-sm text-white"
-              >
-                <option value="">Тег</option>
-                {tags.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={minScore}
-                onChange={(e) => setMinScore(Number(e.target.value))}
-                className="rounded-md border border-white/10 bg-transparent px-2 py-1.5 text-sm text-white"
-              >
-                <option value={0}>Score</option>
-                <option value={5}>≥ 5</option>
-                <option value={7}>≥ 7</option>
-                <option value={8}>≥ 8</option>
-              </select>
+            <div className="graph-filters">
+              <div className="graph-filters-grid">
+                <label className="graph-filter-field">
+                  <span className="graph-filter-label">Категория</span>
+                  <FancySelect
+                    aria-label="Категория"
+                    variant="graph"
+                    value={category}
+                    onChange={setCategory}
+                    onSeekGlobal={focusSearch}
+                    seekGlobalLabel="Искать в сети"
+                    options={[
+                      { value: "", label: "Все" },
+                      ...categories.map((c) => ({ value: c, label: c })),
+                    ]}
+                  />
+                </label>
+                <label className="graph-filter-field">
+                  <span className="graph-filter-label">Тег</span>
+                  <FancySelect
+                    aria-label="Тег"
+                    variant="graph"
+                    value={tag}
+                    onChange={setTag}
+                    onSeekGlobal={focusSearch}
+                    seekGlobalLabel="Искать в сети"
+                    options={[
+                      { value: "", label: "Все" },
+                      ...tags.map((t) => ({ value: t, label: t })),
+                    ]}
+                  />
+                </label>
+                <label className="graph-filter-field graph-filter-field--score">
+                  <span className="graph-filter-label">Score</span>
+                  <div className="graph-score-seg" role="radiogroup" aria-label="Минимальный score">
+                    {[
+                      { v: 0, l: "Все" },
+                      { v: 5, l: "≥5" },
+                      { v: 7, l: "≥7" },
+                      { v: 8, l: "≥8" },
+                    ].map((s) => (
+                      <button
+                        key={s.v}
+                        type="button"
+                        role="radio"
+                        aria-checked={minScore === s.v}
+                        className="graph-score-seg-item"
+                        data-active={minScore === s.v}
+                        onClick={() => setMinScore(s.v)}
+                      >
+                        {s.l}
+                      </button>
+                    ))}
+                  </div>
+                </label>
+              </div>
+              {activeFilters && (
+                <button
+                  type="button"
+                  className="graph-filters-clear"
+                  onClick={() => {
+                    setCategory("");
+                    setTag("");
+                    setMinScore(0);
+                    setQ("");
+                  }}
+                >
+                  Сбросить фильтры
+                </button>
+              )}
             </div>
           )}
         </div>

@@ -31,6 +31,7 @@ from app.api.schemas import (
     SearchRequest,
     SearchResponse,
     TagOut,
+    TtsRequest,
     UrlCreate,
 )
 from app.db import get_session
@@ -79,6 +80,8 @@ def to_list_item(m: Material) -> MaterialListItem:
 
 
 def to_detail(m: Material) -> MaterialDetail:
+    from app.services.audio_media import material_has_audio
+
     base = to_list_item(m)
     return MaterialDetail(
         **base.model_dump(),
@@ -91,6 +94,7 @@ def to_detail(m: Material) -> MaterialDetail:
         usefulness_reason=m.usefulness_reason,
         error_message=m.error_message,
         duration_seconds=m.duration_seconds,
+        has_audio=material_has_audio(m),
         usage_tokens_in=m.usage_tokens_in or 0,
         usage_tokens_out=m.usage_tokens_out or 0,
         usage_audio_seconds=m.usage_audio_seconds or 0,
@@ -295,12 +299,38 @@ async def upload_file(
         source_type = "pdf"
     elif suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"} or mime.startswith("image/"):
         source_type = "image"
-    elif suffix in {".mp4", ".mov", ".mkv", ".webm"} or mime.startswith("video/"):
-        source_type = "video"
-    elif suffix in {".ogg", ".mp3", ".wav", ".m4a"} or mime.startswith("audio/"):
+    elif (
+        suffix
+        in {
+            ".ogg",
+            ".oga",
+            ".opus",
+            ".mp3",
+            ".wav",
+            ".m4a",
+            ".aac",
+            ".flac",
+            ".wma",
+            ".aiff",
+            ".aif",
+            ".caf",
+            ".amr",
+            ".mpga",
+            ".mpeg",
+            ".mp2",
+            ".weba",
+        }
+        or mime.startswith("audio/")
+    ):
         source_type = "voice"
+    elif suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"} or mime.startswith("video/"):
+        source_type = "video"
     else:
-        raise HTTPException(400, f"Unsupported file type: {name}")
+        raise HTTPException(
+            400,
+            f"Неподдерживаемый файл: {name}. "
+            "Можно: PDF, изображение, видео, аудио (mp3/wav/m4a/ogg/flac/aac/opus…).",
+        )
 
     m = await create_material(
         session,
@@ -652,5 +682,110 @@ async def serve_moment(material_id: str, filename: str):
         headers={
             "Cache-Control": "private, max-age=86400",
             "Content-Disposition": f'inline; filename="{filename}"',
+        },
+    )
+
+
+@router.get("/materials/{material_id}/audio")
+async def serve_audio(material_id: str, session: AsyncSession = Depends(get_session)):
+    from fastapi.responses import FileResponse
+
+    from app.services.audio_media import audio_media_type, resolve_material_audio
+
+    m = (
+        await session.execute(select(Material).where(Material.id == material_id))
+    ).scalars().first()
+    if not m:
+        raise HTTPException(404, "Not found")
+    path = resolve_material_audio(m)
+    if not path:
+        raise HTTPException(404, "No audio for this material")
+    return FileResponse(
+        path,
+        media_type=audio_media_type(path),
+        filename=path.name,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": f'inline; filename="{path.name}"',
+        },
+    )
+
+
+@router.get("/tts/voices")
+async def tts_voices():
+    from app.services.tts import list_voices_public
+
+    return {"voices": list_voices_public()}
+
+
+@router.post("/tts")
+async def synthesize_tts(body: TtsRequest):
+    from fastapi.responses import FileResponse, StreamingResponse
+
+    from app.services.tts import (
+        cache_path_for,
+        iter_speech_audio,
+        prepare_for_speech,
+        resolve_voice,
+        synthesize_speech,
+    )
+
+    prepared = prepare_for_speech(body.text)
+    if not prepared:
+        raise HTTPException(400, "Пустой текст для озвучки")
+
+    key, voice_id = resolve_voice(body.voice)
+    cached = cache_path_for(prepared, voice_id)
+    if cached.is_file() and cached.stat().st_size > 0:
+        return FileResponse(
+            cached,
+            media_type="audio/mpeg",
+            filename=f"tts-{key}.mp3",
+            headers={
+                "Cache-Control": "private, max-age=86400",
+                "X-TTS-Voice": key,
+                "X-TTS-Cache": "hit",
+                "Content-Disposition": f'inline; filename="tts-{key}.mp3"',
+            },
+        )
+
+    # Short clips: blocking save is fine and simpler for <audio>
+    if len(prepared) <= 280:
+        try:
+            path, voice_key = await synthesize_speech(body.text, body.voice)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except Exception as e:
+            raise HTTPException(502, f"TTS недоступен: {e}") from e
+        return FileResponse(
+            path,
+            media_type="audio/mpeg",
+            filename=f"tts-{voice_key}.mp3",
+            headers={
+                "Cache-Control": "private, max-age=86400",
+                "X-TTS-Voice": voice_key,
+                "X-TTS-Cache": "miss",
+                "Content-Disposition": f'inline; filename="tts-{voice_key}.mp3"',
+            },
+        )
+
+    async def gen():
+        try:
+            async for part in iter_speech_audio(body.text, body.voice):
+                yield part
+        except Exception as e:
+            log = __import__("app.logging_setup", fromlist=["get_logger"]).get_logger(__name__)
+            log.warning("tts_stream_failed", error=str(e)[:200])
+            raise
+
+    return StreamingResponse(
+        gen(),
+        media_type="audio/mpeg",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "X-TTS-Voice": key,
+            "X-TTS-Cache": "stream",
+            "Content-Disposition": f'inline; filename="tts-{key}.mp3"',
         },
     )

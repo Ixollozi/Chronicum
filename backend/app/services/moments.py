@@ -237,13 +237,13 @@ async def _ensure_timed_segments(material: Material, vpath: str) -> list[dict]:
 
         try:
             client = get_transcribe_client()
-            tr = await client.transcribe(audio)
+            tr = await client.transcribe(audio, language="ru")
         except RuntimeError:
             from app.ai import get_transcribe_client_pooled
 
             async with SessionLocal() as session:
                 client = await get_transcribe_client_pooled(session)
-                tr = await client.transcribe(audio)
+                tr = await client.transcribe(audio, language="ru")
 
         if tr.segments:
             segs = []

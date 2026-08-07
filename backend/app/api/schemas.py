@@ -33,6 +33,7 @@ class MaterialDetail(MaterialListItem):
     usefulness_reason: str | None = None
     error_message: str | None = None
     duration_seconds: float | None = None
+    has_audio: bool = False
     usage_tokens_in: int = 0
     usage_tokens_out: int = 0
     usage_audio_seconds: float = 0
@@ -69,6 +70,11 @@ class CategoryCreate(BaseModel):
 
 class ComposerRequest(BaseModel):
     text: str = Field(..., min_length=1)
+
+
+class TtsRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=12000)
+    voice: str = Field(default="svetlana", description="svetlana | dmitry")
 
 
 class ComposerResponse(BaseModel):

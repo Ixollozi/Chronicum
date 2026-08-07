@@ -128,6 +128,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const isGraph = pathname === "/graph";
   const isArchive = pathname === "/archive";
+  const isSettings = pathname === "/settings";
   const isMaterial = pathname.startsWith("/m/");
 
   return (
@@ -135,7 +136,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       className={
         isGraph
           ? "app-shell app-shell--graph relative z-10 min-h-[100dvh]"
-          : isArchive
+          : isArchive || isSettings
             ? "app-shell app-shell--archive relative z-10 mx-auto min-h-[100dvh] max-w-[88rem] px-3 pt-3 md:px-6 md:pb-8 md:pt-6"
             : isMaterial
               ? "app-shell app-shell--material relative z-10 mx-auto min-h-[100dvh] max-w-6xl px-4 pt-3 md:px-8 md:pb-10 md:pt-8"

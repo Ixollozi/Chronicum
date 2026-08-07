@@ -84,9 +84,30 @@ async def extract_text_for_material(
 
     if source_type == "voice":
         assert file_path
+        from app.services.audio_media import WHISPER_NATIVE_SUFFIXES
+
+        media_path = file_path
+        audio_for_asr = file_path
+        suffix = Path(file_path).suffix.lower()
+        if suffix not in WHISPER_NATIVE_SUFFIXES:
+            # Convert exotic containers (aac/wma/aiff/amr/…) via ffmpeg → mp3
+            mp3 = str(Path(file_path).with_suffix(".mp3"))
+            try:
+                audio_for_asr = await extract_audio(file_path, mp3)
+            except Exception as e:
+                log.warning("voice_convert_failed", error=str(e)[:200], path=file_path)
+                audio_for_asr = file_path
+
         client = await _whisper_client(settings)
-        result = await client.transcribe(file_path)
-        return result.text, "Voice note", result.audio_seconds or None, result.audio_seconds, file_path
+        result = await client.transcribe(audio_for_asr, language="ru")
+        title = Path(file_path).stem or "Голосовая заметка"
+        return (
+            result.text,
+            title,
+            result.audio_seconds or None,
+            result.audio_seconds,
+            media_path,
+        )
 
     if source_type in {"youtube", "instagram", "video"}:
         if source_type in {"youtube", "instagram"}:
@@ -114,9 +135,9 @@ async def extract_text_for_material(
             src_for_cut = video_for_frames if source_type == "video" else audio_path
             try:
                 await extract_audio_segment(src_for_cut, 0, seg_dur, seg_path)
-                tr = await client.transcribe(seg_path)
+                tr = await client.transcribe(seg_path, language="ru")
             except Exception:
-                tr = await client.transcribe(audio_path)
+                tr = await client.transcribe(audio_path, language="ru")
             text = tr.text
             frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_preview_frames"))
             frames = await extract_keyframes(
@@ -127,7 +148,7 @@ async def extract_text_for_material(
                 text = f"{text}\n\n[On-screen text OCR preview]\n{ocr}"
             return text, title, duration, tr.audio_seconds, media_path
 
-        tr = await client.transcribe(audio_path)
+        tr = await client.transcribe(audio_path, language="ru")
         text = tr.text
         frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_frames"))
         frames = await extract_keyframes(video_for_frames, frames_dir)

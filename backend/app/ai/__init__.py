@@ -25,8 +25,8 @@ Return ONLY valid JSON (no markdown fences) with this exact shape:
   "tools": ["..."],
   "technologies": ["..."],
   "links": ["..."],
-  "category": "MUST be one of the provided categories when possible (exact name)",
-  "tags": ["2-6 tags; REUSE existing approved tags verbatim when they fit; avoid near-duplicates"],
+  "category": "EXACT name from Existing categories only, or \"\" if none fit. NEVER invent / force a mismatched category (e.g. do not pick Маркетинг for unrelated banter)",
+  "tags": ["2-6 tags; REUSE existing approved tags verbatim when they fit; avoid near-duplicates; skip fluff tags for empty/noise content"],
   "usefulness_signals": {
     "actionability": 1-5,
     "novelty": 1-5,
@@ -254,20 +254,32 @@ class GroqTranscribeClient(TranscribeClient):
         try:
             p = Path(path)
             data = p.read_bytes()
+            # Default Russian — Chronicum archive is RU-first. Explicit prompt reduces
+            # Whisper's habit of censoring / softening swear words.
+            lang = language or "ru"
             kwargs: dict[str, Any] = {
                 "file": (p.name, data),
                 "model": self.model,
+                "language": lang,
                 "response_format": "verbose_json",
                 "timestamp_granularities": ["segment"],
+                "temperature": 0,
+                "prompt": (
+                    "Транскрипция разговорной русской речи. "
+                    "Пиши дословно, сохраняй мат, сленг и междометия. "
+                    "Не цензурируй и не заменяй слова звёздочками или эвфемизмами."
+                ),
             }
-            if language:
-                kwargs["language"] = language
             try:
                 resp = await self.client.audio.transcriptions.create(**kwargs)
             except Exception:
-                # Older API / models may reject timestamp_granularities
+                # Older API / models may reject timestamp_granularities or prompt
                 kwargs.pop("timestamp_granularities", None)
-                resp = await self.client.audio.transcriptions.create(**kwargs)
+                try:
+                    resp = await self.client.audio.transcriptions.create(**kwargs)
+                except Exception:
+                    kwargs.pop("prompt", None)
+                    resp = await self.client.audio.transcriptions.create(**kwargs)
         except Exception as e:
             msg = str(e).lower()
             if "401" in msg or "invalid api key" in msg:
@@ -422,9 +434,12 @@ async def analyze_material(
         f"You are Chronicum knowledge extractor. Produce a {mode}. Respond in Russian when source is Russian.\n"
         f"{CARD_JSON_SCHEMA_HINT}\n"
         f"{profile_block}\n"
-        f"Existing categories: {', '.join(categories)}\n"
+        f"Existing categories (CLOSED LIST — pick exact string or \"\"): "
+        f"{', '.join(categories) if categories else '(none yet — leave category empty)'}\n"
         f"Existing approved tags: {', '.join(tags) if tags else '(none yet)'}\n"
-        "Reuse existing category/tag strings exactly when they fit. "
+        "Category rules: copy an existing category name EXACTLY, or use empty string. "
+        "Do NOT create new category names. Do NOT assign a category that does not clearly fit the material.\n"
+        "Reuse existing tag strings exactly when they fit. "
         "Do not invent spelling variants (CapCut/капкат/cap cut → one tag). "
         "Always include a crisp digest for lazy readers.\n"
         "Be a strict reviewer on usefulness_signals — generosity and ignoring the personal profile make the archive useless."

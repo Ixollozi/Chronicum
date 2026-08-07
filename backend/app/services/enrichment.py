@@ -46,8 +46,10 @@ async def build_explanation(session: AsyncSession, material: Material) -> Materi
     system = (
         "You are a clear teacher. Write a detailed but structured explanation of the material "
         "for someone who skipped the source. Use Russian if the source is Russian. "
+        "Respond in Markdown: ## headings, lists, **bold**, and fenced code blocks with language tags "
+        "(```python, ```js, ```bash, …) whenever code/commands appear. "
         "Sections: Суть, Как это работает, Примеры/кейсы, Как применить, На что обратить внимание. "
-        "Plain text with short headings, no JSON."
+        "No JSON wrapper."
     )
     user = _material_context(material)
 

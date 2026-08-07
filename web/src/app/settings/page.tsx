@@ -77,34 +77,39 @@ const HORIZONS = [
 
 const CONTEXT_FIELDS = {
   role: {
-    q: "Кем ты себя считаешь в работе?",
-    help: "Роль или позиция — коротко",
-    tip: "Например: «владелец агентства» или «продакт». ИИ понимает, с какой точки зрения смотреть на материал.",
+    label: "Роль",
+    help: "Кем ты себя считаешь в работе",
+    tip: "Например: «владелец агентства» или «продакт». ИИ смотрит на материал с этой точки зрения.",
+    placeholder: "Владелец AI-агентства, продакт, маркетолог…",
   },
   goals: {
-    q: "К каким результатам ты идёшь?",
-    help: "2–5 целей · с новой строки",
+    label: "Цели",
+    help: "2–5 результатов · с новой строки",
     tip: "Зачем ты копил материалы. Если контент двигает к этим целям — оценка выше.",
+    placeholder: "Масштабировать delivery\nЗакрывать сделки\nСобрать базу знаний",
   },
   focuses: {
-    q: "Что для тебя сейчас «в теме»?",
-    help: "Повышает оценку",
-    tip: "Темы, которые обычно нужны. Совпадение с ними заметно поднимает personal fit и итоговый score.",
+    label: "В теме",
+    help: "Поднимает оценку",
+    tip: "Темы, которые обычно нужны. Совпадение заметно поднимает personal fit.",
+    placeholder: "AI и LLM\nМонтаж Reels\nДизайн\nПродажи",
   },
   anti: {
-    q: "Что почти всегда мимо?",
+    label: "Мимо",
     help: "Понижает оценку",
-    tip: "Темы, которые редко бывают полезны. Такие материалы получают ниже score, даже если сами по себе качественные.",
+    tip: "Темы, которые редко бывают полезны — score ниже, даже если материал сам по себе сильный.",
+    placeholder: "Крипта\nГеймдев\nСпорт",
   },
   horizon: {
-    q: "На какой срок смотреть полезность?",
-    help: "Как сравнивать «сейчас» и «на потом»",
+    label: "Горизонт",
+    help: "На какой срок смотреть полезность",
     tip: "От этого зависит, хвалить ли срочные хаки или длинные стратегии.",
   },
   priorities: {
-    q: "Что важнее всего прямо сейчас?",
-    help: "1–3 приоритета · сильнее всего влияют",
-    tip: "Самый сильный сигнал. Материал, который бьёт в текущие приоритеты, почти всегда в топе оценки.",
+    label: "Приоритеты",
+    help: "1–3 пункта · самый сильный сигнал",
+    tip: "Материал, который бьёт в текущие приоритеты, почти всегда в топе оценки.",
+    placeholder: "Упаковать офферы, ускорить монтаж Reels, наладить базу знаний…",
   },
 };
 
@@ -118,6 +123,24 @@ function linesToList(text: string): string[] {
 
 function listToLines(items: string[] | undefined): string {
   return (items || []).join("\n");
+}
+
+function Tip({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="settings-tip">
+      <button
+        type="button"
+        className="settings-tip-btn"
+        aria-expanded={open}
+        aria-label={open ? "Скрыть подсказку" : "Показать подсказку"}
+        onClick={() => setOpen((v) => !v)}
+      >
+        ?
+      </button>
+      {open && <span className="settings-tip-body">{text}</span>}
+    </span>
+  );
 }
 
 export default function SettingsPage() {
@@ -174,6 +197,8 @@ export default function SettingsPage() {
   const crmCount = keys.filter((k) => k.source === "crm").length;
   const poolCount = keys.length;
   const enabledCount = keys.filter((k) => k.enabled).length;
+  const tabIndex = TABS.findIndex((t) => t.id === tab);
+  const activeTab = TABS[tabIndex]!;
 
   async function patchMode(body: Partial<AppSettings>) {
     setError(null);
@@ -212,48 +237,77 @@ export default function SettingsPage() {
     }
   }
 
-  const activeTab = TABS.find((t) => t.id === tab)!;
+  const lede =
+    tab === "context"
+      ? "Короткие ответы — и ИИ оценивает материалы именно для тебя, а не «вообще»."
+      : tab === "keys"
+        ? "Сначала Groq, при исчерпании — Gemini. Ключи из интерфейса или .env."
+        : "Глубина разбора, автомоменты и порядок провайдеров по умолчанию.";
 
   return (
-    <section className="settings-page animate-fade">
-      <header className="settings-hero">
-        <p className="settings-eyebrow">Параметры архива</p>
+    <section className="settings-root animate-fade" data-tab={tab}>
+      <div className="settings-atmos" aria-hidden="true" />
+
+      {/* Desktop only: same slot as archive «Архив» */}
+      <div className="settings-titlebar">
+        <p className="settings-titlebar-eyebrow">Chronicum</p>
         <h1 className="settings-title" style={{ fontFamily: "var(--font-display)" }}>
           Настройки
         </h1>
-        <div className="settings-title-rule" />
-        <p className="settings-lede">
-          {tab === "context"
-            ? "Ответь коротко — ИИ будет оценивать материалы именно для тебя, а не «вообще»."
-            : tab === "keys"
-              ? "Сначала Groq, при исчерпании — Gemini. Ключи из UI или .env."
-              : "Глубина разбора, автомоменты и порядок провайдеров."}
-        </p>
-      </header>
-
-      <div className="settings-tabs" role="tablist" aria-label="Разделы настроек">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={tab === t.id}
-            className="settings-tab settings-hint"
-            data-active={tab === t.id}
-            data-tip={t.tip}
-            onClick={() => {
-              setTab(t.id);
-              setError(null);
-              setCheckMsg(null);
-            }}
-          >
-            <span className="settings-tab-label">{t.label}</span>
-            <span className="settings-tab-hint">{t.hint}</span>
-          </button>
-        ))}
       </div>
-      <p className="settings-inline-help md:hidden" aria-live="polite">
-        {activeTab.tip || activeTab.hint}
+
+      <div className="settings-page">
+        <header className="settings-hero">
+          <div className="settings-folio">
+            <span>Chronicum</span>
+            <span className="settings-folio-dot" aria-hidden="true" />
+            <span>Параметры</span>
+          </div>
+          <h1
+            className="settings-title settings-title--in-hero"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            Настройки
+          </h1>
+          <p className="settings-hero-sub" style={{ fontFamily: "var(--font-display)" }}>
+            как архив думает <em>с тобой</em>
+          </p>
+          <div className="settings-title-rule" aria-hidden="true" />
+          <p className="settings-lede" key={tab}>
+            {lede}
+          </p>
+        </header>
+
+      <div className="settings-chrome">
+        <div
+          className="settings-tabs"
+          role="tablist"
+          aria-label="Разделы настроек"
+          style={{ ["--tab-i" as string]: tabIndex }}
+        >
+          <span className="settings-tabs-thumb" aria-hidden="true" />
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              aria-selected={tab === t.id}
+              className="settings-tab"
+              data-active={tab === t.id}
+              onClick={() => {
+                setTab(t.id);
+                setError(null);
+                setCheckMsg(null);
+              }}
+            >
+              <span className="settings-tab-label">{t.label}</span>
+              <span className="settings-tab-hint">{t.hint}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="settings-inline-help" aria-live="polite" key={`help-${tab}`}>
+        {activeTab.tip}
       </p>
 
       {error && (
@@ -264,9 +318,9 @@ export default function SettingsPage() {
 
       {!settings && tab === "modes" && (
         <div className="settings-skel">
-          <div className="archive-skeleton h-24 w-full rounded-[var(--radius-xl)]" />
-          <div className="archive-skeleton mt-3 h-24 w-full rounded-[var(--radius-xl)]" />
+          <div className="archive-skeleton h-20 w-full rounded-[var(--radius-xl)]" />
           <div className="archive-skeleton mt-3 h-16 w-full rounded-[var(--radius-xl)]" />
+          <div className="archive-skeleton mt-3 h-24 w-full rounded-[var(--radius-xl)]" />
         </div>
       )}
 
@@ -275,11 +329,9 @@ export default function SettingsPage() {
           <div className="settings-section-head">
             <div>
               <p className="settings-kicker">Анализ</p>
-              <h2
-                className="settings-section-title settings-hint"
-                data-tip="Выбери, насколько подробно Chronicum разбирает новые ссылки и заметки сразу после сохранения."
-              >
+              <h2 className="settings-section-title">
                 Глубина по умолчанию
+                <Tip text="Насколько подробно Chronicum разбирает новые ссылки и заметки сразу после сохранения." />
               </h2>
             </div>
             {modeFlash && <span className="settings-flash">{modeFlash}</span>}
@@ -292,23 +344,26 @@ export default function SettingsPage() {
                 type="button"
                 role="radio"
                 aria-checked={settings.default_depth === d.id}
-                className="settings-choice settings-hint"
+                className="settings-choice settings-depth-choice"
                 data-active={settings.default_depth === d.id}
-                data-tip={d.tip}
                 onClick={() => patchMode({ default_depth: d.id })}
               >
+                <span className="settings-choice-mark" aria-hidden="true" />
                 <span className="settings-choice-title">{d.title}</span>
                 <span className="settings-choice-desc">{d.desc}</span>
               </button>
             ))}
           </div>
+          <p className="settings-depth-note" aria-live="polite">
+            {DEPTHS.find((d) => d.id === settings.default_depth)?.desc}
+          </p>
 
-          <div
-            className="settings-toggle-row settings-hint"
-            data-tip="Для YouTube / Instagram / видео ИИ выберет ключевые кадры и сохранит скриншоты. Можно выключить, если нужны только текст и выжимка."
-          >
+          <div className="settings-toggle-row">
             <div>
-              <p className="settings-field-label">Автоскриншоты</p>
+              <p className="settings-field-label">
+                Автоскриншоты
+                <Tip text="Для YouTube / Instagram / видео ИИ выберет ключевые кадры и сохранит скриншоты. Можно выключить, если нужны только текст и выжимка." />
+              </p>
               <p className="settings-field-help">Ключевые кадры для видео снимаются автоматически</p>
             </div>
             <button
@@ -323,14 +378,13 @@ export default function SettingsPage() {
             </button>
           </div>
 
-          <div
-            className="settings-info settings-hint"
-            data-tip="В каком порядке Chronicum ходит в AI. Если первый провайдер исчерпал лимит или упал — берётся следующий."
-          >
+          <div className="settings-info">
             <p className="settings-kicker">Провайдеры</p>
             <p className="settings-info-text">
               Порядок:{" "}
-              <strong>{(settings.provider_order || []).join(" → ") || "не задан"}</strong>
+              <strong className="settings-provider-chain">
+                {(settings.provider_order || []).join(" → ") || "не задан"}
+              </strong>
             </p>
             <p className="settings-field-help mt-2">
               Личный профиль для оценки — во вкладке{" "}
@@ -345,117 +399,122 @@ export default function SettingsPage() {
 
       {tab === "context" && (
         <div className="settings-panel" role="tabpanel" aria-label={activeTab.label}>
-          <div
-            className="settings-callout settings-hint"
-            data-tip="Оценка 1–10 считается для тебя: personal fit смотрит на совпадение с целями, темами и приоритетами. Без профиля оценка «средняя», как для случайного читателя."
-          >
-            <p className="settings-kicker">Как это работает</p>
-            <p className="settings-callout-text">
-              Chronicum смотрит на материал глазами твоего профиля: что совпало с интересами —
-              поднимает оценку, что мимо — опускает. Без ответов оценка нейтральная.
-            </p>
-          </div>
-
-          <div className="settings-form">
-            <label className="settings-field">
-              <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.role.tip}>
-                <span className="settings-q-num">1</span>
-                {CONTEXT_FIELDS.role.q}
-              </span>
-              <span className="settings-field-help">{CONTEXT_FIELDS.role.help}</span>
+          <div className="settings-bento">
+            <article className="settings-bento-tile" data-tile="role">
+              <header className="settings-bento-head">
+                <p className="settings-bento-kicker">О тебе</p>
+                <h2 className="settings-bento-title">
+                  {CONTEXT_FIELDS.role.label}
+                  <Tip text={CONTEXT_FIELDS.role.tip} />
+                </h2>
+                <p className="settings-bento-help">{CONTEXT_FIELDS.role.help}</p>
+              </header>
               <input
                 value={role}
                 onChange={(e) => setRole(e.target.value)}
-                placeholder="Например: владелец AI-агентства, продакт, маркетолог…"
+                placeholder={CONTEXT_FIELDS.role.placeholder}
                 className="settings-input"
               />
-            </label>
+            </article>
 
-            <label className="settings-field">
-              <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.goals.tip}>
-                <span className="settings-q-num">2</span>
-                {CONTEXT_FIELDS.goals.q}
-              </span>
-              <span className="settings-field-help">{CONTEXT_FIELDS.goals.help}</span>
-              <textarea
-                value={goalsText}
-                onChange={(e) => setGoalsText(e.target.value)}
-                rows={3}
-                placeholder={"Масштабировать delivery\nЗакрывать сделки\nСобрать личную базу знаний"}
-                className="settings-textarea"
-              />
-            </label>
-
-            <div className="settings-form-grid">
-              <label className="settings-field">
-                <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.focuses.tip}>
-                  <span className="settings-q-num">3</span>
-                  {CONTEXT_FIELDS.focuses.q}
-                </span>
-                <span className="settings-field-help">{CONTEXT_FIELDS.focuses.help}</span>
-                <textarea
-                  value={focusesText}
-                  onChange={(e) => setFocusesText(e.target.value)}
-                  rows={4}
-                  placeholder={"AI и LLM\nМонтаж Reels / CapCut\nДизайн\nПродажи агентства"}
-                  className="settings-textarea"
-                />
-              </label>
-              <label className="settings-field">
-                <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.anti.tip}>
-                  <span className="settings-q-num">4</span>
-                  {CONTEXT_FIELDS.anti.q}
-                </span>
-                <span className="settings-field-help">{CONTEXT_FIELDS.anti.help}</span>
-                <textarea
-                  value={antiText}
-                  onChange={(e) => setAntiText(e.target.value)}
-                  rows={4}
-                  placeholder={"Крипта\nГеймдев\nСпорт"}
-                  className="settings-textarea"
-                />
-              </label>
-            </div>
-
-            <div className="settings-field">
-              <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.horizon.tip}>
-                <span className="settings-q-num">5</span>
-                {CONTEXT_FIELDS.horizon.q}
-              </span>
-              <span className="settings-field-help">{CONTEXT_FIELDS.horizon.help}</span>
-              <div className="settings-horizon" role="radiogroup" aria-label="Горизонт применения">
+            <article className="settings-bento-tile" data-tile="horizon">
+              <header className="settings-bento-head">
+                <p className="settings-bento-kicker">Срок</p>
+                <h2 className="settings-bento-title">
+                  {CONTEXT_FIELDS.horizon.label}
+                  <Tip text={CONTEXT_FIELDS.horizon.tip} />
+                </h2>
+                <p className="settings-bento-help">{CONTEXT_FIELDS.horizon.help}</p>
+              </header>
+              <div className="settings-bento-horizon" role="radiogroup" aria-label="Горизонт применения">
                 {HORIZONS.map((h) => (
                   <button
                     key={h.id}
                     type="button"
                     role="radio"
                     aria-checked={horizon === h.id}
-                    className="settings-choice compact settings-hint"
+                    className="settings-bento-hz"
                     data-active={horizon === h.id}
-                    data-tip={h.tip}
                     onClick={() => setHorizon(h.id)}
                   >
-                    <span className="settings-choice-title">{h.label}</span>
-                    <span className="settings-choice-desc">{h.desc}</span>
+                    <span className="settings-bento-hz-label">{h.label}</span>
+                    <span className="settings-bento-hz-desc">{h.desc}</span>
                   </button>
                 ))}
               </div>
-            </div>
+            </article>
 
-            <label className="settings-field">
-              <span className="settings-q settings-hint" data-tip={CONTEXT_FIELDS.priorities.tip}>
-                <span className="settings-q-num">6</span>
-                {CONTEXT_FIELDS.priorities.q}
-              </span>
-              <span className="settings-field-help">{CONTEXT_FIELDS.priorities.help}</span>
+            <article className="settings-bento-tile" data-tile="goals">
+              <header className="settings-bento-head">
+                <p className="settings-bento-kicker">Направление</p>
+                <h2 className="settings-bento-title">
+                  {CONTEXT_FIELDS.goals.label}
+                  <Tip text={CONTEXT_FIELDS.goals.tip} />
+                </h2>
+                <p className="settings-bento-help">{CONTEXT_FIELDS.goals.help}</p>
+              </header>
+              <textarea
+                value={goalsText}
+                onChange={(e) => setGoalsText(e.target.value)}
+                rows={4}
+                placeholder={CONTEXT_FIELDS.goals.placeholder}
+                className="settings-textarea"
+              />
+            </article>
+
+            <article className="settings-bento-tile" data-tile="focus">
+              <header className="settings-bento-head">
+                <p className="settings-bento-kicker">Фокус</p>
+                <h2 className="settings-bento-title">
+                  {CONTEXT_FIELDS.focuses.label}
+                  <Tip text={CONTEXT_FIELDS.focuses.tip} />
+                </h2>
+                <p className="settings-bento-help">{CONTEXT_FIELDS.focuses.help}</p>
+              </header>
+              <textarea
+                value={focusesText}
+                onChange={(e) => setFocusesText(e.target.value)}
+                rows={5}
+                placeholder={CONTEXT_FIELDS.focuses.placeholder}
+                className="settings-textarea"
+              />
+            </article>
+
+            <article className="settings-bento-tile" data-tile="anti">
+              <header className="settings-bento-head">
+                <p className="settings-bento-kicker">Фильтр</p>
+                <h2 className="settings-bento-title">
+                  {CONTEXT_FIELDS.anti.label}
+                  <Tip text={CONTEXT_FIELDS.anti.tip} />
+                </h2>
+                <p className="settings-bento-help">{CONTEXT_FIELDS.anti.help}</p>
+              </header>
+              <textarea
+                value={antiText}
+                onChange={(e) => setAntiText(e.target.value)}
+                rows={5}
+                placeholder={CONTEXT_FIELDS.anti.placeholder}
+                className="settings-textarea"
+              />
+            </article>
+
+            <article className="settings-bento-tile settings-bento-tile--accent" data-tile="now">
+              <header className="settings-bento-head">
+                <p className="settings-bento-kicker">Сейчас</p>
+                <h2 className="settings-bento-title">
+                  {CONTEXT_FIELDS.priorities.label}
+                  <Tip text={CONTEXT_FIELDS.priorities.tip} />
+                </h2>
+                <p className="settings-bento-help">{CONTEXT_FIELDS.priorities.help}</p>
+              </header>
               <textarea
                 value={priorities}
                 onChange={(e) => setPriorities(e.target.value)}
                 rows={3}
-                placeholder="Сейчас важнее всего: упаковать офферы, ускорить монтаж Reels, наладить базу знаний…"
+                placeholder={CONTEXT_FIELDS.priorities.placeholder}
                 className="settings-textarea"
               />
-            </label>
+            </article>
           </div>
 
           <div className="settings-footer">
@@ -465,15 +524,11 @@ export default function SettingsPage() {
               onClick={saveProfile}
               className="settings-btn primary"
             >
-              {busy ? "Сохраняю…" : "Сохранить ответы"}
+              {busy ? "Сохраняю…" : "Сохранить"}
             </button>
             {profileSaved && <span className="settings-flash">{profileSaved}</span>}
-            <p
-              className="settings-footnote settings-hint"
-              data-tip="Новый профиль влияет только на свежие разборы. Чтобы пересчитать старый материал, открой карточку и нажми «Повторить» или полную обработку."
-            >
-              Старые карточки сами не пересчитаются. Новый score — на свежих разборах или после
-              «Повторить».
+            <p className="settings-footnote">
+              Новые ответы влияют на свежие разборы. Старые карточки — через «Повторить».
             </p>
           </div>
         </div>
@@ -481,56 +536,48 @@ export default function SettingsPage() {
 
       {tab === "keys" && (
         <div className="settings-panel" role="tabpanel" aria-label={activeTab.label}>
-          <div className="settings-provider-grid" role="tablist" aria-label="Провайдер">
-            <button
-              type="button"
-              className="settings-choice settings-hint"
-              data-active={provider === "groq"}
-              data-tip="Основной провайдер. Быстрые ответы, обычно идёт первым в очереди. Сюда добавляй ключи вида gsk_…"
-              onClick={() => setProvider("groq")}
+          <div className="settings-keys-bar">
+            <div
+              className="settings-seg settings-seg--provider"
+              role="tablist"
+              aria-label="Провайдер"
+              style={{ ["--seg-i" as string]: provider === "groq" ? 0 : 1 }}
             >
-              <span className="settings-choice-title">Groq</span>
-              <span className="settings-choice-desc">Основной · быстро</span>
-            </button>
-            <button
-              type="button"
-              className="settings-choice settings-hint"
-              data-active={provider === "google"}
-              data-tip="Запасной провайдер. Используется, если Groq недоступен или все его ключи вышли из строя."
-              onClick={() => setProvider("google")}
-            >
-              <span className="settings-choice-title">Gemini</span>
-              <span className="settings-choice-desc">Fallback Google</span>
-            </button>
+              <span className="settings-seg-thumb" aria-hidden="true" />
+              <button
+                type="button"
+                role="tab"
+                aria-selected={provider === "groq"}
+                className="settings-seg-item"
+                data-active={provider === "groq"}
+                onClick={() => setProvider("groq")}
+              >
+                Groq
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={provider === "google"}
+                className="settings-seg-item"
+                data-active={provider === "google"}
+                onClick={() => setProvider("google")}
+              >
+                Gemini
+              </button>
+            </div>
           </div>
 
-          <div className="settings-stats">
-            <span
-              className="settings-stat settings-hint"
-              data-tip="Сколько ключей доступно для выбранного провайдера: и из UI (CRM), и из .env."
-            >
-              В пуле · {poolCount}
-            </span>
-            <span
-              className="settings-stat settings-hint"
-              data-tip="Сколько ключей сейчас включены и могут использоваться для запросов."
-            >
-              Активны · {enabledCount}
-            </span>
-            <span
-              className="settings-stat settings-hint"
-              data-tip="Ключи, добавленные здесь в интерфейсе. Их можно выключать и удалять. Ключи из .env — только для чтения."
-            >
-              CRM · {crmCount}
-            </span>
-          </div>
+          <p className="settings-keys-lead">
+            {provider === "groq"
+              ? "Основной провайдер — быстрые ответы. Ключи вида gsk_…"
+              : "Запасной провайдер, если Groq недоступен. Ключи из Google AI Studio."}
+          </p>
 
-          <div className="settings-toolbar">
+          <div className="settings-keys-actions">
             <button
               type="button"
               disabled={busy}
-              className="settings-btn primary settings-hint"
-              data-tip="Пингует каждый ключ в пуле: сколько живых (OK) и сколько с ошибкой (fail)."
+              className="settings-btn primary"
               onClick={async () => {
                 setBusy(true);
                 setCheckMsg(null);
@@ -546,13 +593,40 @@ export default function SettingsPage() {
                 }
               }}
             >
-              Проверить {provider === "groq" ? "Groq" : "Gemini"}
+              Проверить
             </button>
             <button type="button" className="settings-btn" onClick={() => loadKeys()}>
               Обновить
             </button>
             {checkMsg && <span className="settings-flash">{checkMsg}</span>}
+            {provider === "groq" ? (
+              <a
+                href="https://console.groq.com/keys"
+                target="_blank"
+                rel="noreferrer"
+                className="settings-inline-link settings-keys-ext"
+              >
+                Получить ключ →
+              </a>
+            ) : (
+              <a
+                href="https://aistudio.google.com/apikey"
+                target="_blank"
+                rel="noreferrer"
+                className="settings-inline-link settings-keys-ext"
+              >
+                Получить ключ →
+              </a>
+            )}
           </div>
+
+          <p className="settings-keys-meta">
+            <span>{poolCount} в пуле</span>
+            <span aria-hidden="true">·</span>
+            <span>{enabledCount} акт.</span>
+            <span aria-hidden="true">·</span>
+            <span>{crmCount} CRM</span>
+          </p>
 
           <ul className="settings-key-list">
             {keys.map((k) => (
@@ -563,25 +637,33 @@ export default function SettingsPage() {
                     <span className="settings-key-badge" data-source={k.source}>
                       {k.source === "env" ? ".env" : "CRM"}
                     </span>
-                    {!k.enabled && <span className="settings-key-badge warn">выкл</span>}
                   </div>
                   <p className="settings-key-meta">
-                    ••••{k.hint}
-                    {k.last_error ? ` · ${k.last_error.slice(0, 48)}` : ""}
+                    <span className="settings-key-mono">••••{k.hint}</span>
                   </p>
+                  {k.last_error && (
+                    <p className="settings-key-error">{k.last_error.slice(0, 72)}</p>
+                  )}
+                  {k.source === "env" && (
+                    <p className="settings-key-env">Только из окружения — выключить нельзя</p>
+                  )}
                 </div>
                 <div className="settings-key-actions">
                   {k.source === "crm" && typeof k.id === "number" && (
                     <>
                       <button
                         type="button"
-                        className="settings-btn ghost"
+                        role="switch"
+                        aria-checked={k.enabled}
+                        aria-label={k.enabled ? "Выключить ключ" : "Включить ключ"}
+                        className="settings-switch settings-switch--sm"
+                        data-on={k.enabled}
                         onClick={async () => {
                           await client.patchKey(k.id as number, { enabled: !k.enabled });
                           await loadKeys();
                         }}
                       >
-                        {k.enabled ? "Выкл" : "Вкл"}
+                        <span className="settings-switch-knob" />
                       </button>
                       <button
                         type="button"
@@ -596,15 +678,15 @@ export default function SettingsPage() {
                       </button>
                     </>
                   )}
-                  {k.source === "env" && (
-                    <span className="settings-key-env">только из окружения</span>
-                  )}
                 </div>
               </li>
             ))}
             {keys.length === 0 && (
               <li className="settings-empty">
-                Пул пуст — добавь ключи ниже или пропиши в .env
+                <p className="settings-empty-title" style={{ fontFamily: "var(--font-display)" }}>
+                  Пул пуст
+                </p>
+                <p className="settings-empty-desc">Добавь ключ ниже или пропиши в .env</p>
               </li>
             )}
           </ul>
@@ -612,12 +694,9 @@ export default function SettingsPage() {
           <div className="settings-add">
             <div className="settings-section-head">
               <div>
-                <p className="settings-kicker">Добавить</p>
-                <h2
-                  className="settings-section-title settings-hint"
-                  data-tip="Можно вставить несколько ключей сразу — каждый с новой строки или через запятую. После сохранения полный ключ больше не показывается, только хвост ••••."
-                >
-                  Ключи {provider === "groq" ? "Groq" : "Gemini"}
+                <p className="settings-kicker">Новый ключ</p>
+                <h2 className="settings-section-title">
+                  {provider === "groq" ? "Groq" : "Gemini"}
                 </h2>
               </div>
             </div>
@@ -631,6 +710,7 @@ export default function SettingsPage() {
               onChange={(e) => setLabel(e.target.value)}
               placeholder="Подпись (необязательно)"
               className="settings-input mt-4"
+              autoComplete="off"
             />
 
             <div className="settings-secret mt-3">
@@ -640,6 +720,8 @@ export default function SettingsPage() {
                 rows={3}
                 placeholder={provider === "groq" ? "gsk_..." : "AIza..."}
                 className="settings-textarea"
+                autoComplete="off"
+                spellCheck={false}
                 style={showKeys ? undefined : ({ WebkitTextSecurity: "disc" } as React.CSSProperties)}
               />
               <button
@@ -671,31 +753,13 @@ export default function SettingsPage() {
                   }
                 }}
               >
-                + Добавить в пул
+                Добавить в пул
               </button>
-              {provider === "groq" ? (
-                <a
-                  href="https://console.groq.com/keys"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="settings-inline-link"
-                >
-                  console.groq.com → Keys
-                </a>
-              ) : (
-                <a
-                  href="https://aistudio.google.com/apikey"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="settings-inline-link"
-                >
-                  Google AI Studio → API key
-                </a>
-              )}
             </div>
           </div>
         </div>
       )}
+      </div>
     </section>
   );
 }

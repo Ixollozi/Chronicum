@@ -23,6 +23,7 @@ export type MaterialDetail = MaterialListItem & {
   usefulness_reason: string | null;
   error_message: string | null;
   duration_seconds: number | null;
+  has_audio?: boolean;
   usage_tokens_in: number;
   usage_tokens_out: number;
   usage_audio_seconds: number;
@@ -78,7 +79,7 @@ export type ApiKeyItem = {
 };
 
 export type ComposerResult = {
-  intent: "url" | "note" | "search" | string;
+  intent: "url" | "note" | "search" | "refuse" | string;
   message: string;
   material_id: string | null;
   answer: string | null;

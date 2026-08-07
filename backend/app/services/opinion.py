@@ -31,7 +31,7 @@ async def build_opinion(session: AsyncSession, material: Material) -> Material:
         f"Главная идея: {material.main_idea or ''}\n"
         f"Оценка в базе: {material.usefulness_score}/10 — {material.usefulness_reason or ''}\n"
         f"Ключевые идеи: {material.key_ideas or []}\n\n"
-        "Структура ответа (на русском):\n"
+        "Структура ответа (на русском, Markdown — ## заголовки, списки, при коде — fenced blocks с языком):\n"
         "1) Короткий вердикт\n"
         "2) Что подтверждается извне\n"
         "3) С чем стоит быть осторожнее\n"

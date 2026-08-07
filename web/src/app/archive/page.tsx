@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArchivePreview } from "@/components/ArchivePreview";
+import { FancySelect } from "@/components/FancySelect";
 import {
   MaterialRow,
   SOURCE_LABEL,
@@ -290,19 +291,16 @@ export default function ArchivePage() {
               ))}
             </div>
             <div className="archive-filters-row">
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="lib-select"
+              <FancySelect
                 aria-label="Категория"
-              >
-                <option value="">Все категории</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.name}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
+                variant="archive"
+                value={category}
+                onChange={setCategory}
+                options={[
+                  { value: "", label: "Все категории" },
+                  ...categories.map((c) => ({ value: c.name, label: c.name })),
+                ]}
+              />
               {filtersActive && (
                 <button
                   type="button"

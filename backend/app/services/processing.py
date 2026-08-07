@@ -103,9 +103,11 @@ async def _apply_card(session: AsyncSession, material: Material, card, cat_map, 
     material.usefulness_reason = card.usefulness_reason
     material.usefulness_updated_at = datetime.now(timezone.utc)
 
-    cat = await resolve_category(session, card.category or "", cat_map, allow_create=True)
+    cat = await resolve_category(session, card.category or "", cat_map, allow_create=False)
     if cat:
         material.category_id = cat.id
+    else:
+        material.category_id = None
 
     material.tags.clear()
     await session.flush()

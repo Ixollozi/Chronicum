@@ -3,7 +3,10 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { MaterialListen } from "@/components/MaterialListen";
 import { MomentsGallery } from "@/components/MomentsGallery";
+import { RichText } from "@/components/RichText";
+import { TranscriptView } from "@/components/TranscriptView";
 import { StatusPill, cleanMetaPart, formatShortDate } from "@/components/MaterialRow";
 import { client, type MaterialDetail } from "@/lib/api";
 
@@ -81,7 +84,10 @@ export default function MaterialPage() {
     if (m.objective_evaluation) list.push({ id: "evaluation", label: "Оценка" });
     if (m.ai_opinion) list.push({ id: "opinion", label: "Мнение" });
     if (m.detailed_explanation) list.push({ id: "explain", label: "Подробно" });
-    if (m.key_moments?.length) list.push({ id: "moments", label: "Кадры" });
+    const videoish = ["youtube", "instagram", "video"].includes(m.source_type);
+    if (videoish || (m.key_moments?.length ?? 0) > 0) {
+      list.push({ id: "moments", label: "Кадры" });
+    }
     if (m.raw_text) list.push({ id: "raw", label: "Текст" });
     return list;
   }, [m]);
@@ -203,6 +209,53 @@ export default function MaterialPage() {
   const reason = m.usefulness_reason || "";
   const hasOverviewBody = Boolean(digest || (m.main_idea && m.main_idea !== digest));
 
+  const speakParts: string[] = [];
+  switch (current.id) {
+    case "overview": {
+      // Important card body first — title alone is useless for TTS
+      if (m.main_idea) speakParts.push(m.main_idea);
+      if (digest) speakParts.push(digest);
+      if (reason) speakParts.push(reason);
+      if (!speakParts.length && m.title) speakParts.push(m.title);
+      break;
+    }
+    case "ideas":
+      (m.key_ideas || []).forEach((idea, i) => {
+        speakParts.push(`Идея ${i + 1}. ${idea}`);
+      });
+      break;
+    case "takeaways":
+      (m.practical_takeaways || []).forEach((item, i) => {
+        speakParts.push(`Вывод ${i + 1}. ${item}`);
+      });
+      break;
+    case "evaluation": {
+      if (evalObj?.verdict) speakParts.push(String(evalObj.verdict));
+      if (evalObj?.best_for) speakParts.push(`Кому полезно: ${evalObj.best_for}`);
+      if (evalObj?.pros?.length) speakParts.push(`Плюсы: ${evalObj.pros.join(". ")}`);
+      if (evalObj?.cons?.length) speakParts.push(`Минусы: ${evalObj.cons.join(". ")}`);
+      break;
+    }
+    case "opinion":
+      if (m.ai_opinion) speakParts.push(m.ai_opinion);
+      break;
+    case "explain":
+      if (m.detailed_explanation) speakParts.push(m.detailed_explanation);
+      break;
+    case "raw":
+      // Prefer speech without flooding — drop timestamps via MaterialListen stripper
+      if (m.raw_text) speakParts.push(m.raw_text.slice(0, 8000));
+      break;
+    case "moments":
+      // Frames are visual — no TTS
+      break;
+    default:
+      break;
+  }
+  const speakText = speakParts.filter(Boolean).join("\n\n");
+  const speakLabel = current.label;
+  const speakKey = `${m.id}:${current.id}`;
+
   async function pickScore(n: number) {
     if (!m) return;
     setScore(n);
@@ -241,111 +294,130 @@ export default function MaterialPage() {
       case "overview":
         return (
           <div className="deck-overview">
-            <h1 className="deck-title" style={{ fontFamily: "var(--font-display)" }}>
-              {m.title || "Без названия"}
-            </h1>
-
-            <div className="deck-meta">
-              <span className="deck-meta-chip">{source}</span>
-              {category && <span className="deck-meta-chip">{category}</span>}
-              {dateLabel && <span className="deck-meta-chip">{dateLabel}</span>}
-              {m.source_url && (
-                <a
-                  href={m.source_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="deck-meta-chip link"
-                >
-                  источник ↗
-                </a>
-              )}
-            </div>
-
-            {!!m.tags.length && (
-              <div className="deck-tags">
-                {m.tags.map((t) => (
-                  <span key={t} className="deck-tag">
-                    #{t}
-                  </span>
-                ))}
-              </div>
-            )}
-
-            <div className="deck-score-row">
-              <button
-                type="button"
-                className="deck-score-hit"
-                aria-expanded={showScore}
-                aria-label="Изменить оценку полезности"
-                onClick={() => {
-                  setShowScore((v) => !v);
-                  setShowMore(false);
-                }}
-              >
-                <span className="deck-score-inline" style={{ fontFamily: "var(--font-display)" }}>
-                  <span className="text-[var(--accent)]">{scoreValue ?? "—"}</span>
-                  <span className="text-[var(--muted)]">/10</span>
-                </span>
-                <span className="deck-score-cue">
-                  {scoreFlash ? "Сохранено" : showScore ? "Выберите" : "Оценка"}
-                </span>
-              </button>
-            </div>
-
-            {reason && !showScore && (
-              <div className="deck-reason-wrap">
-                <p className="deck-reason">{reason}</p>
-              </div>
-            )}
-
-            {showScore && (
-              <div className="deck-score-panel" role="group" aria-label="Оценка от 1 до 10">
-                <p className="deck-panel-label">Нажмите, чтобы сохранить</p>
-                <div className="deck-score-grid">
-                  {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
-                    <button
-                      key={n}
-                      type="button"
-                      className="deck-score-chip"
-                      data-active={score === n}
-                      disabled={busy === "score"}
-                      onClick={() => pickScore(n)}
-                    >
-                      {n}
-                    </button>
-                  ))}
-                </div>
-                {busy === "score" && <p className="deck-score-saving">Сохраняю…</p>}
-              </div>
-            )}
-
-            {m.main_idea && m.main_idea !== digest && <p className="deck-lead">{m.main_idea}</p>}
-
-            {digest && (
-              <div className="deck-digest">
-                <p className="deck-kicker">Выжимка</p>
-                {digestAsList ? (
-                  <ul className="deck-bullets">
-                    {lines.map((line) => (
-                      <li key={line}>{line}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="deck-prose whitespace-pre-wrap">{digest}</p>
+            <header className="deck-overview-head">
+              <h1 className="deck-title" style={{ fontFamily: "var(--font-display)" }}>
+                {m.title || "Без названия"}
+              </h1>
+              <div className="deck-meta">
+                <span className="deck-meta-chip">{source}</span>
+                {category && <span className="deck-meta-chip">{category}</span>}
+                {dateLabel && <span className="deck-meta-chip">{dateLabel}</span>}
+                {m.source_url && (
+                  <a
+                    href={m.source_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="deck-meta-chip link"
+                  >
+                    источник ↗
+                  </a>
                 )}
               </div>
-            )}
+              {!!m.tags.length && (
+                <div className="deck-tags">
+                  {m.tags.map((t) => (
+                    <span key={t} className="deck-tag">
+                      #{t}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </header>
 
-            {!hasOverviewBody && (
-              <div className="deck-waiting">
-                <p className="deck-kicker">{isProcessing ? "В работе" : "Пока пусто"}</p>
-                <p>
-                  {isProcessing
-                    ? "Материал обрабатывается — выжимка появится здесь."
-                    : "Запустите обогащение или полную обработку, чтобы заполнить карточку."}
-                </p>
+            <div className="deck-overview-body">
+              <div className="deck-overview-copy">
+                {m.main_idea && m.main_idea !== digest && (
+                  <p className="deck-lead">{m.main_idea}</p>
+                )}
+
+                {digest && (
+                  <div className="deck-digest">
+                    <p className="deck-kicker">Выжимка</p>
+                    {digestAsList ? (
+                      <ul className="deck-bullets">
+                        {lines.map((line) => (
+                          <li key={line}>{line}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <RichText text={digest} className="deck-prose" />
+                    )}
+                  </div>
+                )}
+
+                {!hasOverviewBody && (
+                  <div className="deck-waiting">
+                    <p className="deck-kicker">{isProcessing ? "В работе" : "Пока пусто"}</p>
+                    <p>
+                      {isProcessing
+                        ? "Материал обрабатывается — выжимка появится здесь."
+                        : "Запустите обогащение или полную обработку, чтобы заполнить карточку."}
+                    </p>
+                  </div>
+                )}
               </div>
-            )}
+
+              <aside className="deck-overview-rail" aria-label="Оценка и прослушивание">
+                <div className="deck-score-row">
+                  <button
+                    type="button"
+                    className="deck-score-hit"
+                    aria-expanded={showScore}
+                    aria-label="Изменить оценку полезности"
+                    onClick={() => {
+                      setShowScore((v) => !v);
+                      setShowMore(false);
+                    }}
+                  >
+                    <span className="deck-score-inline" style={{ fontFamily: "var(--font-display)" }}>
+                      <span className="text-[var(--accent)]">{scoreValue ?? "—"}</span>
+                      <span className="text-[var(--muted)]">/10</span>
+                    </span>
+                    <span className="deck-score-cue">
+                      {scoreFlash ? "Сохранено" : showScore ? "Выберите" : "Оценка"}
+                    </span>
+                  </button>
+                </div>
+
+                {reason && !showScore && (
+                  <div className="deck-reason-wrap">
+                    <p className="deck-reason">{reason}</p>
+                  </div>
+                )}
+
+                {showScore && (
+                  <div className="deck-score-panel" role="group" aria-label="Оценка от 1 до 10">
+                    <p className="deck-panel-label">Нажмите, чтобы сохранить</p>
+                    <div className="deck-score-grid">
+                      {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+                        <button
+                          key={n}
+                          type="button"
+                          className="deck-score-chip"
+                          data-active={score === n}
+                          disabled={busy === "score"}
+                          onClick={() => pickScore(n)}
+                        >
+                          {n}
+                        </button>
+                      ))}
+                    </div>
+                    {busy === "score" && <p className="deck-score-saving">Сохраняю…</p>}
+                  </div>
+                )}
+
+                <div className="deck-overview-listen">
+                  <MaterialListen
+                    materialId={m.id}
+                    hasAudio={Boolean(m.has_audio)}
+                    durationSeconds={m.duration_seconds}
+                    speakText={speakText}
+                    speakLabel={speakLabel}
+                    speakKey={speakKey}
+                  />
+                </div>
+              </aside>
+            </div>
 
             <div className="deck-actions">
               <button
@@ -564,7 +636,7 @@ export default function MaterialPage() {
         return (
           <div className="deck-slide-inner">
             <p className="deck-kicker">Мнение ИИ</p>
-            <div className="deck-prose whitespace-pre-wrap">{m.ai_opinion}</div>
+            <RichText text={m.ai_opinion} className="deck-prose" />
           </div>
         );
 
@@ -572,9 +644,10 @@ export default function MaterialPage() {
         return (
           <div className="deck-slide-inner">
             <p className="deck-kicker">Подробное объяснение</p>
-            <div className="deck-prose whitespace-pre-wrap text-[color-mix(in_srgb,var(--ink)_90%,var(--muted))]">
-              {m.detailed_explanation}
-            </div>
+            <RichText
+              text={m.detailed_explanation}
+              className="deck-prose text-[color-mix(in_srgb,var(--ink)_90%,var(--muted))]"
+            />
           </div>
         );
 
@@ -582,7 +655,17 @@ export default function MaterialPage() {
         return (
           <div className="deck-slide-inner deck-slide-wide">
             <p className="deck-kicker">Ключевые кадры</p>
-            <MomentsGallery materialId={m.id} moments={m.key_moments || []} embedded />
+            {(m.key_moments?.length ?? 0) > 0 ? (
+              <MomentsGallery materialId={m.id} moments={m.key_moments || []} embedded />
+            ) : (
+              <div className="deck-waiting">
+                <p>
+                  {isProcessing
+                    ? "Кадры появятся после обработки видео."
+                    : "Пока нет кадров. Соберите их через «Ещё → Ключевые кадры» в обзоре."}
+                </p>
+              </div>
+            )}
           </div>
         );
 
@@ -590,7 +673,7 @@ export default function MaterialPage() {
         return (
           <div className="deck-slide-inner">
             <p className="deck-kicker">Полный текст</p>
-            <pre className="deck-raw">{m.raw_text}</pre>
+            <TranscriptView text={m.raw_text || ""} />
           </div>
         );
 
@@ -619,12 +702,13 @@ export default function MaterialPage() {
         if (slides.length < 2) return;
         if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.25) return;
         const el = e.target as HTMLElement | null;
-        if (el?.closest?.(".deck-raw, .moments-gallery, .deck-score-panel, input, textarea, select, button, a")) {
+        if (el?.closest?.(".deck-raw, .deck-raw-md, .transcript-view, .moments-gallery, .material-listen, .deck-score-panel, input, textarea, select, button, a")) {
           return;
         }
         go(slide + (dx < 0 ? 1 : -1));
       }}
     >
+      <div className="deck-frame">
       <header className="deck-chrome">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           <Link href="/archive" className="deck-back">
@@ -670,6 +754,19 @@ export default function MaterialPage() {
         </div>
       )}
 
+      {current.id !== "overview" && (
+        <div className="material-listen-dock material-listen-dock--bar">
+          <MaterialListen
+            materialId={m.id}
+            hasAudio={Boolean(m.has_audio)}
+            durationSeconds={m.duration_seconds}
+            speakText={speakText}
+            speakLabel={speakLabel}
+            speakKey={speakKey}
+          />
+        </div>
+      )}
+
       <div
         key={current.id}
         className="deck-stage"
@@ -678,6 +775,7 @@ export default function MaterialPage() {
         aria-label={current.label}
       >
         {stageBody}
+      </div>
       </div>
 
       {slides.length > 1 && (

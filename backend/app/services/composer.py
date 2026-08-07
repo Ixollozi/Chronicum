@@ -1,4 +1,4 @@
-"""Unified composer: decide whether text is a URL, note, or question."""
+"""Unified composer: URL / note / search, plus a thin jailbreak gate."""
 
 from __future__ import annotations
 
@@ -8,12 +8,15 @@ from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.logging_setup import get_logger
+from app.models import ProcessingStatus
 from app.search import answer_question
 from app.services.processing import create_material
 from app.services.queue import enqueue_material
 from app.services.sources import UnsupportedSourceError, classify_url
 from app.services.storage import text_sha256, url_sha256
-from app.models import ProcessingStatus
+
+log = get_logger(__name__)
 
 URL_RE = re.compile(r"https?://\S+", re.I)
 QUESTION_START = (
@@ -45,7 +48,35 @@ QUESTION_START = (
     "find ",
 )
 
-Intent = Literal["url", "note", "search"]
+# Minimal gate: block prompt-injection / jailbreak only.
+# Songs, code dumps, drafts, random notes — all allowed into the archive.
+JAILBREAK_RE = re.compile(
+    r"(?is)"
+    r"("
+    r"игнорируй\s+(все\s+)?(предыдущие|вышестоящие|системные)?\s*(правила|инструкции|промпт)"
+    r"|забудь\s+(все\s+)?(инструкции|правила|промпт)"
+    r"|ignore\s+(all\s+)?(previous|prior|above|system)\s+(instructions?|prompts?|rules?)"
+    r"|disregard\s+(all\s+)?(previous|prior|system)\s+(instructions?|prompts?|rules?)"
+    r"|jailbreak"
+    r"|dan\s+mode"
+    r"|developer\s+mode\b"
+    r"|do\s+anything\s+now"
+    r"|ты\s+теперь\s+(ии|бот|ассистент|dan)\b"
+    r"|you\s+are\s+now\s+(dan|unrestricted|jailbroken)\b"
+    r"|act\s+as\s+if\s+you\s+have\s+no\s+(restrictions|rules|limits)"
+    r"|reveal\s+(your\s+)?(system\s+)?prompt"
+    r"|покажи\s+(свой\s+)?системн(ый|ые)\s+промпт"
+    r"|открой\s+системн"
+    r"|system\s*prompt\s*:\s*"
+    r")"
+)
+
+DEFAULT_REFUSE = (
+    "Похоже на попытку взломать промпт — такое Chronicum не принимает. "
+    "Кинь материал в архив или спроси по базе."
+)
+
+Intent = Literal["url", "note", "search", "refuse"]
 
 
 @dataclass
@@ -57,8 +88,8 @@ class ComposerResult:
     sources: list | None = None
 
 
-def classify_intent(text: str) -> Intent | None:
-    """Return intent or None if ambiguous (needs LLM)."""
+def classify_intent(text: str) -> Intent:
+    """Heuristic intent (URL / search / note)."""
     raw = text.strip()
     if not raw:
         return "note"
@@ -74,12 +105,14 @@ def classify_intent(text: str) -> Intent | None:
     if raw.endswith("?") or lower.startswith(QUESTION_START):
         return "search"
 
-    # "про X" as a short lookup (not "просто…")
     if re.match(r"^про\s+\S+", lower) and len(raw) < 100:
         return "search"
 
-    # Declarative text / dumps → save as note (question markers already caught)
     return "note"
+
+
+def is_jailbreak_attempt(text: str) -> bool:
+    return bool(JAILBREAK_RE.search(text.strip()))
 
 
 async def run_composer(session: AsyncSession, text: str) -> ComposerResult:
@@ -87,8 +120,17 @@ async def run_composer(session: AsyncSession, text: str) -> ComposerResult:
     if not text:
         raise ValueError("Empty input")
 
+    # Thin safety net only — never block songs, code, drafts, offbeat notes.
+    if is_jailbreak_attempt(text):
+        log.info("composer_refused", kind="jailbreak", chars=len(text))
+        return ComposerResult(
+            intent="refuse",
+            message="Отклонено",
+            answer=DEFAULT_REFUSE,
+            sources=[],
+        )
+
     intent = classify_intent(text)
-    assert intent is not None
 
     if intent == "url":
         m = URL_RE.search(text)
@@ -121,7 +163,6 @@ async def run_composer(session: AsyncSession, text: str) -> ComposerResult:
             sources=materials,
         )
 
-    # note
     material = await create_material(
         session,
         source_type="note",

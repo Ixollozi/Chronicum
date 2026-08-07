@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useRef, useState } from "react";
-import { client, type ComposerResult, type MaterialListItem } from "@/lib/api";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { client, type ComposerResult, type GraphPayload, type MaterialListItem } from "@/lib/api";
+import { nodeTypeLabel, searchGraphNodes } from "@/lib/graphSearch";
 
 function autosizeTextarea(el: HTMLTextAreaElement) {
   el.style.height = "0px";
@@ -12,18 +13,29 @@ function autosizeTextarea(el: HTMLTextAreaElement) {
   el.style.overflowY = el.scrollHeight > 160 ? "auto" : "hidden";
 }
 
+function looksLikeUrlOrNote(text: string): boolean {
+  const t = text.trim();
+  if (/^https?:\/\//i.test(t)) return true;
+  if (/\n/.test(t) && t.length > 120) return true;
+  return false;
+}
+
 export default function HomePage() {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const suggestRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ComposerResult | null>(null);
-  const [focused, setFocused] = useState(false);
+  const [graphNodes, setGraphNodes] = useState<GraphPayload["nodes"]>([]);
+  const [showSuggest, setShowSuggest] = useState(false);
 
-  const hasAnswer = result?.intent === "search";
+  const hasSearchAnswer = result?.intent === "search";
+  const refuseMessage = result?.intent === "refuse" ? result.answer : null;
+  const hasAnswer = hasSearchAnswer;
 
   useEffect(() => {
     const vv = window.visualViewport;
@@ -46,6 +58,39 @@ export default function HomePage() {
     if (textRef.current) autosizeTextarea(textRef.current);
   }, [text]);
 
+  useEffect(() => {
+    let alive = true;
+    client
+      .graph()
+      .then((g) => {
+        if (alive) setGraphNodes(g.nodes);
+      })
+      .catch(() => {
+        /* suggestions are optional */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const networkHits = useMemo(() => {
+    if (hasAnswer || looksLikeUrlOrNote(text) || text.trim().length < 2) return [];
+    return searchGraphNodes(graphNodes, text, 10);
+  }, [graphNodes, text, hasAnswer]);
+
+  const suggestOpen = showSuggest && !hasAnswer && networkHits.length > 0;
+
+  useEffect(() => {
+    if (!suggestOpen) return;
+    function onPointer(e: MouseEvent) {
+      const t = e.target as Node;
+      if (composerRef.current?.contains(t)) return;
+      setShowSuggest(false);
+    }
+    document.addEventListener("mousedown", onPointer);
+    return () => document.removeEventListener("mousedown", onPointer);
+  }, [suggestOpen]);
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     const value = text.trim();
@@ -53,10 +98,14 @@ export default function HomePage() {
     setBusy(true);
     setError(null);
     setResult(null);
+    setShowSuggest(false);
     try {
       const res = await client.composer(value);
       setResult(res);
-      if (res.intent !== "search" && res.material_id) {
+      if (res.intent === "search" || res.intent === "refuse") {
+        return;
+      }
+      if (res.material_id) {
         setText("");
         router.push(`/m/${res.material_id}`);
       }
@@ -71,8 +120,14 @@ export default function HomePage() {
     if (!file) return;
     setBusy(true);
     setError(null);
+    setShowSuggest(false);
     try {
-      const res = await client.upload(file);
+      const kind = file.type.startsWith("audio/")
+        ? "voice"
+        : file.type.startsWith("video/")
+          ? "video"
+          : undefined;
+      const res = await client.upload(file, kind);
       router.push(`/m/${res.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка загрузки");
@@ -81,10 +136,15 @@ export default function HomePage() {
     }
   }
 
+  function openInNetwork(id: string) {
+    setShowSuggest(false);
+    router.push(`/graph?focus=${encodeURIComponent(id)}`);
+  }
+
   return (
     <section
       className={`home-page flex flex-col pb-4 md:min-h-[70dvh] md:pb-6 ${
-        hasAnswer || focused
+        hasAnswer
           ? "home-page--docked min-h-[calc(100dvh-var(--app-tabbar-h)-1rem)] justify-start pt-2"
           : "min-h-[calc(100dvh-var(--app-tabbar-h)-2rem)] justify-center"
       }`}
@@ -103,7 +163,7 @@ export default function HomePage() {
         </div>
       )}
 
-      {hasAnswer && (
+      {hasSearchAnswer && (
         <div className="home-answer mx-auto mb-4 w-full max-w-2xl flex-1 animate-fade overflow-y-auto">
           <div className="mb-4 flex items-center justify-between gap-3">
             <p className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">Ответ</p>
@@ -148,15 +208,33 @@ export default function HomePage() {
       <form
         ref={composerRef}
         onSubmit={onSubmit}
-        className={`home-composer mx-auto w-full max-w-2xl animate-rise ${
-          hasAnswer || focused ? "home-composer--dock mt-auto" : "mt-10"
+        className={`home-composer relative z-20 mx-auto w-full max-w-2xl animate-rise ${
+          hasSearchAnswer ? "home-composer--dock mt-auto" : "mt-10"
         }`}
         style={{ animationDelay: "90ms" }}
       >
+        {refuseMessage && (
+          <div className="home-refuse-banner" role="status">
+            <div className="home-refuse-banner-head">
+              <span>Не сохранено</span>
+              <button
+                type="button"
+                className="home-refuse-banner-close"
+                aria-label="Закрыть"
+                onClick={() => setResult(null)}
+              >
+                ✕
+              </button>
+            </div>
+            <p className="home-refuse-banner-text">{refuseMessage}</p>
+          </div>
+        )}
+
         <div className="composer-shell flex items-end gap-2 rounded-[1.35rem] border border-[var(--line)] bg-[var(--surface)] px-3 py-2 shadow-[0_20px_60px_rgba(0,0,0,0.28)] transition focus-within:border-[var(--accent)] focus-within:bg-[var(--surface-hover)]">
           <button
             type="button"
-            aria-label="Прикрепить файл"
+            aria-label="Прикрепить файл или аудио"
+            title="Файл, аудио или видео"
             onClick={() => fileRef.current?.click()}
             className="mb-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-[var(--line)] text-lg text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
           >
@@ -166,24 +244,32 @@ export default function HomePage() {
             ref={fileRef}
             type="file"
             className="hidden"
-            onChange={(e) => onFile(e.target.files?.[0] || null)}
+            accept="audio/*,video/*,image/*,.pdf,.mp3,.wav,.m4a,.ogg,.oga,.opus,.flac,.aac,.wma,.aiff,.aif,.caf,.amr,.webm,.mp4,.mov,.mkv,.png,.jpg,.jpeg,.webp,.gif"
+            onChange={(e) => {
+              const f = e.target.files?.[0] || null;
+              e.target.value = "";
+              void onFile(f);
+            }}
           />
           <textarea
             ref={textRef}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value);
+              setShowSuggest(true);
+              if (result?.intent === "refuse") setResult(null);
+            }}
             rows={1}
             enterKeyHint="send"
-            placeholder={hasAnswer ? "Уточните или задайте новый вопрос…" : "Спросите Chronicum или вставьте ссылку…"}
+            placeholder={hasSearchAnswer ? "Уточните или задайте новый вопрос…" : "Спросите Chronicum или вставьте ссылку…"}
             className="composer-input max-h-40 min-h-[44px] w-full resize-none overflow-hidden bg-transparent py-2.5 outline-none placeholder:text-[var(--muted)]"
-            onFocus={() => {
-              setFocused(true);
-              requestAnimationFrame(() => {
-                composerRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-              });
-            }}
-            onBlur={() => setFocused(false)}
+            onFocus={() => setShowSuggest(true)}
             onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setShowSuggest(false);
+                if (result?.intent === "refuse") setResult(null);
+                return;
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void onSubmit(e as unknown as FormEvent);
@@ -199,7 +285,30 @@ export default function HomePage() {
             {busy ? "…" : "↑"}
           </button>
         </div>
-        {!hasAnswer && (
+
+        {suggestOpen && (
+          <div ref={suggestRef} className="home-net-suggest" role="listbox" aria-label="Точки сети">
+            <p className="home-net-suggest-kicker">В сети</p>
+            <ul className="home-net-suggest-list">
+              {networkHits.map((hit) => (
+                <li key={hit.id}>
+                  <button
+                    type="button"
+                    role="option"
+                    className="home-net-suggest-item"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => openInNetwork(hit.id)}
+                  >
+                    <span className="home-net-suggest-title">{hit.title}</span>
+                    <span className="home-net-suggest-meta">{nodeTypeLabel(hit.type)}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {!hasSearchAnswer && !suggestOpen && !refuseMessage && (
           <p className="composer-kbd-hint composer-kbd-desktop mt-3 text-center text-xs text-[var(--muted)]">
             Enter — отправить · Shift+Enter — новая строка
           </p>

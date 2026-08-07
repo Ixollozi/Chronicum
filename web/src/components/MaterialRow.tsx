@@ -148,8 +148,17 @@ export function MaterialRow({
               score != null ? "text-[var(--accent)]" : "text-[var(--muted)]"
             }`}
             style={{ fontFamily: "var(--font-display)" }}
+            aria-label={score != null ? `Оценка ${score} из 10` : "Оценка отсутствует"}
           >
-            {score != null ? score : "—"}
+            {score != null ? (
+              <>
+                {score}
+                <span className="mx-2.5 text-[color-mix(in_srgb,var(--accent)_45%,var(--muted))]">|</span>
+                <span className="text-[color-mix(in_srgb,var(--accent)_55%,var(--muted))]">10</span>
+              </>
+            ) : (
+              "—"
+            )}
           </span>
         </div>
         <p className="mt-1 line-clamp-1 text-[0.8rem] text-[var(--muted)]">
