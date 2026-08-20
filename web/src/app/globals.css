@@ -41,6 +41,15 @@
   color-scheme: dark;
 }
 
+.brand-mark {
+  display: block;
+  object-fit: cover;
+  background: #fff;
+  flex-shrink: 0;
+  border-radius: 22%;
+  overflow: hidden;
+}
+
 @media (min-width: 768px) {
   :root {
     --app-content-pb: 0px;
@@ -215,6 +224,143 @@ select option {
 
 .composer-shell {
   transition: transform 0.25s ease, border-color 0.2s ease, box-shadow 0.25s ease;
+}
+
+.composer-mode-wrap {
+  align-self: flex-end;
+  z-index: 45;
+}
+
+.composer-mode-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  box-sizing: border-box;
+  height: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0 0.75rem 0 0.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.composer-mode-trigger:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: transparent;
+}
+
+.composer-mode-wrap.is-open .composer-mode-trigger {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: none;
+}
+
+.composer-mode-trigger-label {
+  max-width: 5.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: inherit;
+}
+
+.composer-mode-caret {
+  flex-shrink: 0;
+  color: inherit;
+  opacity: 0.75;
+  transition: transform 0.18s ease, opacity 0.15s ease;
+}
+
+.composer-mode-wrap.is-open .composer-mode-caret {
+  transform: rotate(180deg);
+  opacity: 1;
+}
+
+.composer-mode-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 0.4rem);
+  bottom: auto;
+  z-index: 50;
+  min-width: 15rem;
+  margin: 0;
+  padding: 0.4rem;
+  list-style: none;
+  border-radius: 1rem;
+  border: 1px solid var(--line);
+  background: #141816;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
+  animation: composer-mode-pop 0.16s ease both;
+}
+
+@keyframes composer-mode-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.composer-mode-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  border: 0;
+  border-radius: 0.75rem;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.composer-mode-option:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.composer-mode-option.is-active {
+  background: color-mix(in srgb, var(--accent) 16%, #141816);
+}
+
+.composer-mode-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.composer-mode-option-label {
+  font-size: 0.88rem;
+  font-weight: 550;
+  letter-spacing: -0.01em;
+}
+
+.composer-mode-option-hint {
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.composer-mode-check {
+  flex-shrink: 0;
+  color: var(--accent);
 }
 
 .composer-shell:focus-within {
@@ -573,9 +719,10 @@ select option {
 
 .settings-tabs {
   --tab-pad: 0.28rem;
+  --tab-n: 4;
   position: relative;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--tab-n), minmax(0, 1fr));
   gap: 0;
   padding: var(--tab-pad);
   border: 1px solid color-mix(in srgb, var(--line) 90%, var(--accent));
@@ -590,7 +737,7 @@ select option {
   top: var(--tab-pad);
   bottom: var(--tab-pad);
   left: var(--tab-pad);
-  width: calc((100% - var(--tab-pad) * 2) / 3);
+  width: calc((100% - var(--tab-pad) * 2) / var(--tab-n, 4));
   border-radius: calc(var(--radius-lg) - 0.05rem);
   background:
     linear-gradient(160deg, color-mix(in srgb, var(--accent) 22%, transparent), var(--accent-soft));
@@ -1454,6 +1601,31 @@ select option {
 .settings-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+a.settings-btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.settings-ide-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 1.15rem;
+}
+
+.settings-ide-rule {
+  margin-top: 0.9rem;
+  padding: 0.95rem 1.05rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  white-space: pre-wrap;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--muted);
 }
 
 .settings-stats {
@@ -4552,6 +4724,7 @@ select option {
   .animate-rise,
   .animate-fade,
   .composer-shell,
+  .composer-mode-menu,
   .archive-skeleton,
   .archive-row,
   .deck-stage[data-dir="1"],
@@ -4624,10 +4797,27 @@ select option {
     display: none;
   }
 
-  .composer-shell button[type="submit"],
-  .composer-shell button[type="button"] {
+  .composer-shell button.composer-attach,
+  .composer-shell button.composer-send,
+  .composer-mode-trigger {
     min-height: 44px;
+    height: 44px;
+  }
+
+  .composer-shell button.composer-attach,
+  .composer-shell button.composer-send {
     min-width: 44px;
+  }
+
+  .composer-mode-trigger {
+    max-width: 7.5rem;
+    padding-inline: 0.75rem 0.65rem;
+    font-size: 0.78rem;
+  }
+
+  .composer-mode-menu {
+    min-width: min(17rem, calc(100vw - 2rem));
+    background: #141816;
   }
 
   .composer-kbd-desktop {

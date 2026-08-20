@@ -1,7 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { client, type ApiKeyItem, type AppSettings, type PersonalProfile } from "@/lib/api";
+import { client, getToken, type ApiKeyItem, type AppSettings, type PersonalProfile } from "@/lib/api";
+import {
+  IDE_RULE,
+  apiOrigin,
+  claudeCodeCommand,
+  claudeDesktopSnippet,
+  cursorMcpInstallLink,
+  mcpHttpUrl,
+  vscodeMcpInstallLink,
+  vscodeMcpJsonSnippet,
+  windsurfSnippet,
+} from "@/lib/mcpConnect";
 
 const emptyProfile = (): PersonalProfile => ({
   role: "",
@@ -30,6 +41,12 @@ const TABS = [
     label: "Ключи",
     hint: "Пулы AI",
     tip: "API-ключи для AI. Groq — основной (быстро), Gemini — запасной, если Groq недоступен.",
+  },
+  {
+    id: "ide" as const,
+    label: "IDE",
+    hint: "Cursor · MCP",
+    tip: "Cursor, VS Code и Insiders открываются диплинком. Claude / Windsurf — JSON или CLI. User Rules IDE сама не пропишет — копируй правило.",
   },
 ];
 
@@ -144,7 +161,7 @@ function Tip({ text }: { text: string }) {
 }
 
 export default function SettingsPage() {
-  const [tab, setTab] = useState<"modes" | "context" | "keys">("modes");
+  const [tab, setTab] = useState<"modes" | "context" | "keys" | "ide">("modes");
   const [provider, setProvider] = useState<"groq" | "google">("groq");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [keys, setKeys] = useState<ApiKeyItem[]>([]);
@@ -156,6 +173,13 @@ export default function SettingsPage() {
   const [checkMsg, setCheckMsg] = useState<string | null>(null);
   const [profileSaved, setProfileSaved] = useState<string | null>(null);
   const [modeFlash, setModeFlash] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [health, setHealth] = useState<{
+    status: string;
+    mode: string;
+    ai_ready: boolean;
+    mcp_http?: boolean;
+  } | null>(null);
 
   const [role, setRole] = useState("");
   const [goalsText, setGoalsText] = useState("");
@@ -192,6 +216,12 @@ export default function SettingsPage() {
     if (tab === "keys") {
       loadKeys().catch((e) => setError(e instanceof Error ? e.message : "Ошибка"));
     }
+    if (tab === "ide") {
+      client
+        .health()
+        .then(setHealth)
+        .catch(() => setHealth(null));
+    }
   }, [tab, loadKeys]);
 
   const crmCount = keys.filter((k) => k.source === "crm").length;
@@ -199,6 +229,12 @@ export default function SettingsPage() {
   const enabledCount = keys.filter((k) => k.enabled).length;
   const tabIndex = TABS.findIndex((t) => t.id === tab);
   const activeTab = TABS[tabIndex]!;
+
+  async function copyText(id: string, text: string) {
+    await navigator.clipboard.writeText(text);
+    setCopied(id);
+    window.setTimeout(() => setCopied(null), 1600);
+  }
 
   async function patchMode(body: Partial<AppSettings>) {
     setError(null);
@@ -242,7 +278,9 @@ export default function SettingsPage() {
       ? "Короткие ответы — и ИИ оценивает материалы именно для тебя, а не «вообще»."
       : tab === "keys"
         ? "Сначала Groq, при исчерпании — Gemini. Ключи из интерфейса или .env."
-        : "Глубина разбора, автомоменты и порядок провайдеров по умолчанию.";
+        : tab === "ide"
+          ? "Cursor ставится диплинком. MCP крутится на том же API, что и кабинет. User Rules IDE не умеет принимать с сайта — копируй текст."
+        : "Глубина разбора, автомоменты и расшифровка видео по умолчанию.";
 
   return (
     <section className="settings-root animate-fade" data-tab={tab}>
@@ -362,7 +400,7 @@ export default function SettingsPage() {
             <div>
               <p className="settings-field-label">
                 Автоскриншоты
-                <Tip text="Для YouTube / Instagram / видео ИИ выберет ключевые кадры и сохранит скриншоты. Можно выключить, если нужны только текст и выжимка." />
+                <Tip text="Для YouTube / Instagram / TikTok / видео ИИ выберет ключевые кадры и сохранит скриншоты. Можно выключить, если нужны только текст и выжимка." />
               </p>
               <p className="settings-field-help">Ключевые кадры для видео снимаются автоматически</p>
             </div>
@@ -373,6 +411,26 @@ export default function SettingsPage() {
               className="settings-switch"
               data-on={settings.auto_moments}
               onClick={() => patchMode({ auto_moments: !settings.auto_moments })}
+            >
+              <span className="settings-switch-knob" />
+            </button>
+          </div>
+
+          <div className="settings-toggle-row">
+            <div>
+              <p className="settings-field-label">
+                Видео целиком
+                <Tip text="По умолчанию Whisper разбирает всё аудио, не первые 20%. Выключи, если длинные ролики жрут лимиты Groq — тогда снова preview и full по кнопке." />
+              </p>
+              <p className="settings-field-help">YouTube / Instagram / TikTok / файл — полная расшифровка</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.video_full !== false}
+              className="settings-switch"
+              data-on={settings.video_full !== false}
+              onClick={() => patchMode({ video_full: settings.video_full === false })}
             >
               <span className="settings-switch-knob" />
             </button>
@@ -757,6 +815,96 @@ export default function SettingsPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {tab === "ide" && (
+        <div className="settings-panel" role="tabpanel" aria-label={activeTab.label}>
+          <div className="settings-section-head">
+            <div>
+              <p className="settings-kicker">Агенты</p>
+              <h2 className="settings-section-title">
+                Подключить Chronicum
+                <Tip text="Cursor откроет диалог установки MCP. Подтверди его. Сайт не может тихо прописать конфиг или User Rules." />
+              </h2>
+            </div>
+          </div>
+
+          <div className="settings-info">
+            <p className="settings-kicker">Статус</p>
+            <p className="settings-info-text">
+              API:{" "}
+              <strong>
+                {health ? `${health.status} · ${health.mode}` : "не отвечает"}
+              </strong>
+              {health ? ` · AI ${health.ai_ready ? "готов" : "без ключей"}` : ""}
+            </p>
+            <p className="settings-field-help mt-2">
+              MCP HTTP:{" "}
+              {health?.mcp_http
+                ? `${mcpHttpUrl()} — тот же процесс, что и кабинет`
+                : "не смонтирован (поставь пакет mcp в venv и перезапусти API)"}
+            </p>
+          </div>
+
+          <div className="settings-ide-actions">
+            <a className="settings-btn primary" href={cursorMcpInstallLink(getToken())}>
+              Добавить в Cursor
+            </a>
+            <a className="settings-btn primary" href={vscodeMcpInstallLink(getToken())}>
+              Добавить в VS Code
+            </a>
+            <a className="settings-btn" href={vscodeMcpInstallLink(getToken(), apiOrigin(), "vscode-insiders")}>
+              VS Code Insiders
+            </a>
+          </div>
+          <p className="settings-field-help mt-3">
+            Эти три кнопки открывают IDE. Нужно подтвердить диалог. API должен быть запущен.
+          </p>
+
+          <div className="settings-ide-actions">
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => copyText("rule", IDE_RULE)}
+            >
+              {copied === "rule" ? "Правило скопировано" : "Скопировать правило"}
+            </button>
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => copyText("claude", claudeDesktopSnippet(getToken()))}
+            >
+              {copied === "claude" ? "JSON скопирован" : "Claude Desktop"}
+            </button>
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => copyText("code", claudeCodeCommand(getToken()))}
+            >
+              {copied === "code" ? "Команда скопирована" : "Claude Code CLI"}
+            </button>
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => copyText("windsurf", windsurfSnippet(getToken()))}
+            >
+              {copied === "windsurf" ? "JSON скопирован" : "Windsurf"}
+            </button>
+            <button
+              type="button"
+              className="settings-btn"
+              onClick={() => copyText("vscodejson", vscodeMcpJsonSnippet(getToken()))}
+            >
+              {copied === "vscodejson" ? "JSON скопирован" : "VS Code mcp.json"}
+            </button>
+          </div>
+
+          <p className="settings-field-help mt-4">
+            Claude Desktop / Windsurf: вставь JSON в их mcp-конфиг. Claude Code: выполни команду в
+            терминале. Правило — в User Rules IDE, если хочешь жёстче instructions MCP.
+          </p>
+          <pre className="settings-ide-rule">{IDE_RULE}</pre>
         </div>
       )}
       </div>

@@ -71,6 +71,72 @@ Rules:
 - Most content land around 5–6 after calibration. Do NOT default quality signals to 4–5.
 """.strip()
 
+TASK_JSON_SCHEMA_HINT = """
+Return ONLY valid JSON (no markdown fences) with this exact shape — SAME keys as a knowledge card, but field meanings for a TASK:
+{
+  "title": "short imperative action (глагол + объект)",
+  "summary": "что считается ГОТОВО — критерий результата в 1–2 предложениях",
+  "main_idea": "следующий конкретный шаг (один)",
+  "digest": "чеклист 3–6 строк (каждая — действие)",
+  "key_ideas": ["шаги / подзадачи по порядку"],
+  "practical_takeaways": ["блокеры, риски, дедлайн/когда сделать — если упомянуто"],
+  "tools": ["инструменты если нужны для задачи"],
+  "technologies": [],
+  "links": [],
+  "code_blocks": [],
+  "category": "EXACT name from Existing categories only, or \"\"",
+  "tags": ["2–5 tags"],
+  "usefulness_signals": {
+    "actionability": 1-5,
+    "novelty": 1-5,
+    "specificity": 1-5,
+    "reuse_likelihood": 1-5,
+    "personal_fit": 1-5
+  },
+  "usefulness_score": 1-10,
+  "usefulness_reason": "почему эта задача важна / срочна относительно профиля"
+}
+
+Rules:
+- Do NOT invent fake "key principles" — key_ideas are executable steps.
+- Empty tools/technologies/links/code_blocks when not needed.
+- If input is vague, still produce a concrete next_step in main_idea and askable blockers in practical_takeaways.
+- Respond in Russian when the input is Russian.
+""".strip()
+
+RULE_JSON_SCHEMA_HINT = """
+Return ONLY valid JSON (no markdown fences) with this exact shape — SAME keys as a knowledge card, but field meanings for a RULE:
+{
+  "title": "короткое имя правила",
+  "summary": "когда применять (контекст / триггер)",
+  "main_idea": "формулировка правила — одна чёткая норма",
+  "digest": "1–3 строки: правило + когда включать",
+  "key_ideas": ["примеры правильного применения"],
+  "practical_takeaways": ["антипримеры / чего НЕ делать"],
+  "tools": [],
+  "technologies": [],
+  "links": [],
+  "code_blocks": [],
+  "category": "EXACT name from Existing categories only, or \"\"",
+  "tags": ["2–5 tags"],
+  "usefulness_signals": {
+    "actionability": 1-5,
+    "novelty": 1-5,
+    "specificity": 1-5,
+    "reuse_likelihood": 1-5,
+    "personal_fit": 1-5
+  },
+  "usefulness_score": 1-10,
+  "usefulness_reason": "как правило помогает профилю / снижает повторяющиеся ошибки"
+}
+
+Rules:
+- main_idea MUST be the rule statement itself.
+- Prefer durable guidance over one-off tasks.
+- Empty tools/links/code unless the rule names them.
+- Respond in Russian when the input is Russian.
+""".strip()
+
 
 class RateLimitError(Exception):
     pass
@@ -444,9 +510,22 @@ async def analyze_material(
     session=None,
     personal_profile: dict | None = None,
     screen_resources: str = "",
+    entry_kind: str = "knowledge",
 ) -> LLMResult:
     settings = settings or get_settings()
-    mode = "brief preview relevance analysis" if preview else "full knowledge card"
+    kind = (entry_kind or "knowledge").strip().lower()
+    if kind == "task":
+        schema_hint = TASK_JSON_SCHEMA_HINT
+        role = "Chronicum task extractor. Turn the input into an actionable task card."
+        mode = "task card"
+    elif kind == "rule":
+        schema_hint = RULE_JSON_SCHEMA_HINT
+        role = "Chronicum rule extractor. Turn the input into a durable operating rule."
+        mode = "rule card"
+    else:
+        schema_hint = CARD_JSON_SCHEMA_HINT
+        role = "Chronicum knowledge extractor."
+        mode = "brief preview relevance analysis" if preview else "full knowledge card"
 
     profile = personal_profile
     if profile is None and session is not None:
@@ -460,17 +539,15 @@ async def analyze_material(
     profile_block = format_profile_for_prompt(profile)
 
     system = (
-        f"You are Chronicum knowledge extractor. Produce a {mode}. Respond in Russian when source is Russian.\n"
-        f"{CARD_JSON_SCHEMA_HINT}\n"
+        f"{role} Produce a {mode}. Respond in Russian when source is Russian.\n"
+        f"{schema_hint}\n"
         f"{profile_block}\n"
         f"Existing categories (CLOSED LIST — pick exact string or \"\"): "
         f"{', '.join(categories) if categories else '(none yet — leave category empty)'}\n"
         f"Existing approved tags: {', '.join(tags) if tags else '(none yet)'}\n"
         "Category rules: copy an existing category name EXACTLY, or use empty string. "
-        "Do NOT create new category names. Do NOT assign a category that does not clearly fit the material.\n"
+        "Do NOT create new category names. Do NOT assign a category that does not clearly fit.\n"
         "Reuse existing tag strings exactly when they fit. "
-        "Do not invent spelling variants (CapCut/капкат/cap cut → one tag). "
-        "Always include a crisp digest for lazy readers — with tool names when SCREEN RESOURCES exist.\n"
         "Be a strict reviewer on usefulness_signals — generosity and ignoring the personal profile make the archive useless."
     )
     res_block = (screen_resources or "").strip()
@@ -496,6 +573,7 @@ async def analyze_material(
         tokens_in=result.tokens_in,
         tokens_out=result.tokens_out,
         preview=preview,
+        entry_kind=kind,
         score=result.card.usefulness_score,
         personal_fit=result.card.usefulness_signals.personal_fit,
     )

@@ -7,9 +7,11 @@ from fastapi.responses import JSONResponse
 from app.api.routes import router as api_router
 from app.config import get_settings
 from app.logging_setup import setup_logging
+from app.mcp_http import build_mcp_asgi, mcp_http_enabled
 
 settings = get_settings()
 setup_logging(settings.log_level)
+_mcp_server, _mcp_asgi = build_mcp_asgi()
 
 
 @asynccontextmanager
@@ -18,7 +20,12 @@ async def lifespan(_app: FastAPI):
         from app.db import init_lite_db
 
         await init_lite_db()
-    yield
+    manager = getattr(_mcp_server, "session_manager", None) if _mcp_server is not None else None
+    if manager is not None:
+        async with manager.run():
+            yield
+    else:
+        yield
 
 
 app = FastAPI(title="Chronicum", version="0.3.0", lifespan=lifespan)
@@ -30,6 +37,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(api_router)
+if _mcp_asgi is not None:
+    app.mount("/mcp", _mcp_asgi)
 
 
 @app.get("/health")
@@ -46,5 +55,7 @@ async def health() -> JSONResponse:
             "transcribe_provider": s.transcribe_provider,
             "groq_llm_model": s.groq_llm_model,
             "web_ready": True,
+            "mcp_http": mcp_http_enabled(),
+            "mcp_path": "/mcp" if mcp_http_enabled() else None,
         }
     )

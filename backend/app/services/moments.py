@@ -29,7 +29,7 @@ from app.services.screen_atlas import (
 
 log = get_logger(__name__)
 
-VIDEO_TYPES = {"youtube", "instagram", "video"}
+VIDEO_TYPES = {"youtube", "instagram", "tiktok", "video"}
 _TS_LINE = re.compile(r"^\[(\d{1,3}):(\d{2})(?:\.(\d+))?\]\s*(.*)$")
 _LISTICLE_SPEECH = re.compile(
     r"(?:^|\b)(?:шаг|step)\s*(\d{1,2})\b|#\s*(\d{1,2})\b|"
@@ -363,10 +363,10 @@ async def resolve_video_path(material: Material) -> str | None:
                     return alt
         return p
 
-    if material.source_type in {"youtube", "instagram"} and material.source_url:
+    if material.source_type in {"youtube", "instagram", "tiktok"} and material.source_url:
         from app.pipelines.youtube import download_media_url
 
-        label = "instagram" if material.source_type == "instagram" else "youtube"
+        label = material.source_type
         try:
             path, _title, _dur = await download_media_url(material.source_url, label=label)
             if path and Path(path).exists():
@@ -645,7 +645,7 @@ def build_ocr_picks(atlas: list[AtlasFrame], *, duration: float, max_moments: in
 async def build_key_moments(session: AsyncSession, material: Material, video_path: str | None = None) -> Material:
     """Pick moments from OCR atlas (preferred) + speech; grab frames; local junk filter."""
     if material.source_type not in VIDEO_TYPES:
-        raise ValueError("Moments only for video / youtube / instagram")
+        raise ValueError("Moments only for video / youtube / instagram / tiktok")
 
     from app.services.key_pool import get_app_settings
 
@@ -655,6 +655,8 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
     vpath = video_path if video_path and Path(video_path).exists() else None
     if not vpath:
         vpath = await resolve_video_path(material)
+    if vpath and Path(vpath).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return material
     if vpath and (not material.file_path or not Path(material.file_path).exists()):
         material.file_path = vpath
 

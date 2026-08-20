@@ -22,6 +22,7 @@ SETTINGS_DEFAULTS = {
     "default_depth": "standard",
     "auto_moments": "true",
     "moments_vision_gate": "false",
+    "video_full": "true",
 }
 
 PERSONAL_PROFILE_DEFAULT: dict[str, Any] = {
@@ -147,6 +148,8 @@ async def get_app_settings(session: AsyncSession) -> dict:
         "default_depth": data.get("default_depth", SETTINGS_DEFAULTS["default_depth"]),
         "auto_moments": data.get("auto_moments", SETTINGS_DEFAULTS["auto_moments"]).lower()
         in {"1", "true", "yes"},
+        "video_full": data.get("video_full", SETTINGS_DEFAULTS["video_full"]).lower()
+        in {"1", "true", "yes"},
         "moments_vision_gate": data.get(
             "moments_vision_gate", SETTINGS_DEFAULTS["moments_vision_gate"]
         ).lower()
@@ -162,6 +165,7 @@ async def patch_app_settings(
     default_depth: str | None = None,
     auto_moments: bool | None = None,
     moments_vision_gate: bool | None = None,
+    video_full: bool | None = None,
     personal_profile: dict | None = None,
 ) -> dict:
     if default_depth is not None:
@@ -170,6 +174,8 @@ async def patch_app_settings(
         await _upsert_setting(session, "default_depth", default_depth)
     if auto_moments is not None:
         await _upsert_setting(session, "auto_moments", "true" if auto_moments else "false")
+    if video_full is not None:
+        await _upsert_setting(session, "video_full", "true" if video_full else "false")
     if moments_vision_gate is not None:
         await _upsert_setting(
             session, "moments_vision_gate", "true" if moments_vision_gate else "false"

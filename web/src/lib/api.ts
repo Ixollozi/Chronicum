@@ -1,7 +1,12 @@
+export type EntryKind = "knowledge" | "task" | "rule" | string;
+
+export type ComposerMode = "auto" | "ask" | "knowledge" | "task" | "rule";
+
 export type MaterialListItem = {
   id: string;
   title: string | null;
   source_type: string;
+  entry_kind?: EntryKind;
   source_url: string | null;
   summary: string | null;
   main_idea: string | null;
@@ -106,6 +111,7 @@ export type PersonalProfile = {
 export type AppSettings = {
   default_depth: "compact" | "standard" | "detailed" | string;
   auto_moments: boolean;
+  video_full?: boolean;
   provider_order: string[];
   personal_profile: PersonalProfile;
 };
@@ -122,7 +128,7 @@ export type ApiKeyItem = {
 };
 
 export type ComposerResult = {
-  intent: "url" | "note" | "search" | "refuse" | string;
+  intent: "url" | "note" | "search" | "refuse" | "task" | "rule" | string;
   message: string;
   material_id: string | null;
   answer: string | null;
@@ -207,10 +213,10 @@ export const client = {
       method: "POST",
       body: JSON.stringify({ query }),
     }),
-  composer: (text: string) =>
+  composer: (text: string, mode: ComposerMode = "auto") =>
     api<ComposerResult>("/api/composer", {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, mode }),
     }),
   graph: () => api<GraphPayload>("/api/graph"),
   createNote: (text: string) =>
@@ -247,6 +253,14 @@ export const client = {
       body: JSON.stringify({ name }),
     }),
   getSettings: () => api<AppSettings>("/api/settings"),
+  health: () =>
+    api<{
+      status: string;
+      mode: string;
+      ai_ready: boolean;
+      mcp_http?: boolean;
+      mcp_path?: string | null;
+    }>("/health"),
   patchSettings: (body: Partial<AppSettings>) =>
     api<AppSettings>("/api/settings", { method: "PATCH", body: JSON.stringify(body) }),
   listKeys: (provider?: string) => {

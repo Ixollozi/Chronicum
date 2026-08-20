@@ -36,7 +36,7 @@ class AtlasFrame:
 def atlas_sampling(*, duration: float, source_type: str) -> tuple[float, int]:
     """Return (every_seconds, max_frames)."""
     dur = max(0.0, float(duration or 0))
-    short_or_ig = source_type == "instagram" or dur <= 180
+    short_or_ig = source_type in {"instagram", "tiktok"} or dur <= 180
     if short_or_ig:
         every = 2.0
         max_frames = 45

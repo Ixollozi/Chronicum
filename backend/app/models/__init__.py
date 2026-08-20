@@ -23,12 +23,21 @@ from app.db import Base
 class SourceType(StrEnum):
     YOUTUBE = "youtube"
     INSTAGRAM = "instagram"
+    TIKTOK = "tiktok"
     ARTICLE = "article"
     PDF = "pdf"
     VOICE = "voice"
     NOTE = "note"
     IMAGE = "image"
     VIDEO = "video"
+
+
+class EntryKind(StrEnum):
+    """Why the user saved this — independent of source_type."""
+
+    KNOWLEDGE = "knowledge"
+    TASK = "task"
+    RULE = "rule"
 
 
 class ProcessingStatus(StrEnum):
@@ -74,6 +83,7 @@ class Material(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     title: Mapped[str | None] = mapped_column(String(500))
     source_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entry_kind: Mapped[str] = mapped_column(String(20), default=EntryKind.KNOWLEDGE.value)
     source_url: Mapped[str | None] = mapped_column(String(2000))
     content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     user_id: Mapped[int | None] = mapped_column(Integer, index=True)

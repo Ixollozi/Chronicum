@@ -55,7 +55,14 @@ async def create_material(
     user_id: int | None = None,
     chat_id: int | None = None,
     title: str | None = None,
+    entry_kind: str | None = None,
 ) -> Material:
+    from app.models import EntryKind
+
+    kind = (entry_kind or EntryKind.KNOWLEDGE.value).strip().lower()
+    if kind not in {EntryKind.KNOWLEDGE.value, EntryKind.TASK.value, EntryKind.RULE.value}:
+        kind = EntryKind.KNOWLEDGE.value
+
     dup = await find_duplicate(session, content_hash)
     if dup:
         return dup
@@ -64,6 +71,7 @@ async def create_material(
         id=str(uuid4()),
         title=title,
         source_type=source_type,
+        entry_kind=kind,
         source_url=source_url,
         file_path=file_path,
         content_hash=content_hash,
@@ -159,11 +167,19 @@ async def _refresh_search_vector(session: AsyncSession, material_id: str) -> Non
     )
 
 
-def _decide_stage(source_type: str, duration: float | None, force_full: bool, settings) -> str:
-    if force_full or source_type not in {"youtube", "instagram", "video"}:
+def _decide_stage(
+    source_type: str,
+    duration: float | None,
+    force_full: bool,
+    settings,
+    *,
+    video_full: bool = True,
+) -> str:
+    if force_full or source_type not in {"youtube", "instagram", "tiktok", "video"}:
+        return ProcessingStage.FULL.value
+    if video_full:
         return ProcessingStage.FULL.value
     if duration is None:
-        # Unknown until extract — request preview; extractor upgrades short videos to full
         return ProcessingStage.PREVIEW.value
     if duration > settings.video_preview_threshold_min * 60:
         return ProcessingStage.PREVIEW.value
@@ -189,7 +205,14 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
         if not settings.ai_ready and not await any_provider_ready(session):
             raise RuntimeError("Нет API ключей — добавь Groq/Gemini в Настройках или .env")
 
-        stage = _decide_stage(material.source_type, material.duration_seconds, force_full, settings)
+        app_cfg = await get_app_settings(session)
+        stage = _decide_stage(
+            material.source_type,
+            material.duration_seconds,
+            force_full,
+            settings,
+            video_full=bool(app_cfg.get("video_full", True)),
+        )
 
         storage = Path(settings.storage_path)
         if not storage.is_absolute():
@@ -203,7 +226,7 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
             note_text=material.raw_text,
             stage=stage,
             settings=settings,
-            atlas_dir=atlas_dir if material.source_type in {"youtube", "instagram", "video"} else None,
+            atlas_dir=atlas_dir if material.source_type in {"youtube", "instagram", "tiktok", "video"} else None,
             session=session,
         )
         if dur is not None:
@@ -225,7 +248,6 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
         material.usage_audio_seconds = (material.usage_audio_seconds or 0) + (audio_sec or 0)
 
         categories, tags, cat_map, tag_map = await _taxonomy(session)
-        app_cfg = await get_app_settings(session)
         screen_resources = harvest_resources(raw_text).prompt_block()
         llm = await analyze_material(
             raw_text,
@@ -236,6 +258,7 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
             session=session,
             personal_profile=app_cfg.get("personal_profile"),
             screen_resources=screen_resources,
+            entry_kind=getattr(material, "entry_kind", None) or "knowledge",
         )
         material.usage_tokens_in = (material.usage_tokens_in or 0) + llm.tokens_in
         material.usage_tokens_out = (material.usage_tokens_out or 0) + llm.tokens_out
@@ -280,7 +303,8 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
                     await rebuild_digest(session, material)
                 if (
                     app_cfg.get("auto_moments")
-                    and material.source_type in {"youtube", "instagram", "video"}
+                    and material.source_type in {"youtube", "instagram", "tiktok", "video"}
+                    and (getattr(material, "entry_kind", None) or "knowledge") == "knowledge"
                 ):
                     from app.services.moments import build_key_moments
 

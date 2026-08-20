@@ -16,8 +16,11 @@ const figtree = Figtree({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("http://127.0.0.1:3000"),
   title: "Chronicum",
   description: "Персональная база знаний — кабинет материалов",
+  applicationName: "Chronicum",
+  manifest: "/site.webmanifest",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",

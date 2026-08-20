@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { client, type ComposerResult, type GraphPayload, type MaterialListItem } from "@/lib/api";
+import { BrandMark } from "@/components/BrandMark";
+import { client, type ComposerMode, type ComposerResult, type GraphPayload, type MaterialListItem } from "@/lib/api";
 import { nodeTypeLabel, searchGraphNodes } from "@/lib/graphSearch";
 
 function autosizeTextarea(el: HTMLTextAreaElement) {
@@ -20,13 +21,49 @@ function looksLikeUrlOrNote(text: string): boolean {
   return false;
 }
 
+const MODES: { id: ComposerMode; label: string; hint: string; placeholder: string }[] = [
+  {
+    id: "auto",
+    label: "Авто",
+    hint: "Ссылка / вопрос / заметка",
+    placeholder: "Спросите Chronicum или вставьте ссылку…",
+  },
+  {
+    id: "ask",
+    label: "Спросить",
+    hint: "Ответ по базе",
+    placeholder: "Что сохранить из этого? Как я решаю…",
+  },
+  {
+    id: "knowledge",
+    label: "Знание",
+    hint: "В архив как материал",
+    placeholder: "Мысль, конспект или ссылка на материал…",
+  },
+  {
+    id: "task",
+    label: "Задача",
+    hint: "Сделать → критерий готово",
+    placeholder: "Что сделать? Например: оформить лендинг до пятницы…",
+  },
+  {
+    id: "rule",
+    label: "Правило",
+    hint: "Как работать дальше",
+    placeholder: "Правило: всегда… / никогда не…",
+  },
+];
+
 export default function HomePage() {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const suggestRef = useRef<HTMLDivElement>(null);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState("");
+  const [mode, setMode] = useState<ComposerMode>("auto");
+  const [modeOpen, setModeOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ComposerResult | null>(null);
@@ -36,6 +73,10 @@ export default function HomePage() {
   const hasSearchAnswer = result?.intent === "search";
   const refuseMessage = result?.intent === "refuse" ? result.answer : null;
   const hasAnswer = hasSearchAnswer;
+  const activeMode = MODES.find((m) => m.id === mode) || MODES[0]!;
+  const composerPlaceholder = hasSearchAnswer
+    ? "Уточните или задайте новый вопрос…"
+    : activeMode.placeholder;
 
   useEffect(() => {
     const vv = window.visualViewport;
@@ -74,22 +115,28 @@ export default function HomePage() {
   }, []);
 
   const networkHits = useMemo(() => {
+    if (mode !== "auto" && mode !== "ask") return [];
     if (hasAnswer || looksLikeUrlOrNote(text) || text.trim().length < 2) return [];
     return searchGraphNodes(graphNodes, text, 10);
-  }, [graphNodes, text, hasAnswer]);
+  }, [graphNodes, text, hasAnswer, mode]);
 
   const suggestOpen = showSuggest && !hasAnswer && networkHits.length > 0;
 
   useEffect(() => {
-    if (!suggestOpen) return;
+    if (!suggestOpen && !modeOpen) return;
     function onPointer(e: MouseEvent) {
       const t = e.target as Node;
-      if (composerRef.current?.contains(t)) return;
+      if (modeMenuRef.current?.contains(t)) return;
+      if (suggestOpen && composerRef.current?.contains(t)) {
+        setModeOpen(false);
+        return;
+      }
       setShowSuggest(false);
+      setModeOpen(false);
     }
     document.addEventListener("mousedown", onPointer);
     return () => document.removeEventListener("mousedown", onPointer);
-  }, [suggestOpen]);
+  }, [suggestOpen, modeOpen]);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -100,7 +147,7 @@ export default function HomePage() {
     setResult(null);
     setShowSuggest(false);
     try {
-      const res = await client.composer(value);
+      const res = await client.composer(value, mode);
       setResult(res);
       if (res.intent === "search" || res.intent === "refuse") {
         return;
@@ -151,6 +198,7 @@ export default function HomePage() {
     >
       {!hasAnswer && (
         <div className="home-hero mx-auto w-full max-w-2xl text-center animate-rise">
+          <BrandMark size={72} className="mx-auto mb-5 rounded-[1.25rem] shadow-[0_12px_40px_rgba(0,0,0,0.35)]" priority />
           <h1
             className="home-hero-title text-[clamp(2.8rem,10vw,4.75rem)] leading-[0.92] tracking-[-0.04em]"
             style={{ fontFamily: "var(--font-display)" }}
@@ -158,7 +206,7 @@ export default function HomePage() {
             Chronicum
           </h1>
           <p className="home-hero-sub mx-auto mt-4 max-w-md text-[var(--muted)]">
-            Что сегодня в повестке? Спроси базу, кинь ссылку или сохрани мысль — разберу сам.
+            Спросить базу, сохранить знание, задачу или правило — режим меняет структуру карточки.
           </p>
         </div>
       )}
@@ -236,7 +284,7 @@ export default function HomePage() {
             aria-label="Прикрепить файл или аудио"
             title="Файл, аудио или видео"
             onClick={() => fileRef.current?.click()}
-            className="mb-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-[var(--line)] text-lg text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
+            className="composer-attach mb-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-[var(--line)] text-lg text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
           >
             +
           </button>
@@ -251,22 +299,110 @@ export default function HomePage() {
               void onFile(f);
             }}
           />
+
+          <div
+            ref={modeMenuRef}
+            className={`composer-mode-wrap relative mb-1 shrink-0 ${modeOpen ? "is-open" : ""}`}
+          >
+            <button
+              type="button"
+              className="composer-mode-trigger"
+              aria-haspopup="listbox"
+              aria-expanded={modeOpen}
+              aria-label={`Режим: ${activeMode.label}`}
+              title={activeMode.hint}
+              onClick={() => {
+                setModeOpen((o) => !o);
+                setShowSuggest(false);
+              }}
+            >
+              <span className="composer-mode-trigger-label">{activeMode.label}</span>
+              <svg
+                className="composer-mode-caret"
+                width="12"
+                height="12"
+                viewBox="0 0 12 12"
+                fill="none"
+                aria-hidden
+              >
+                <path
+                  d="M2.5 4.25 6 7.75l3.5-3.5"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+            {modeOpen && (
+              <ul className="composer-mode-menu" role="listbox" aria-label="Режим ввода">
+                {MODES.map((m) => {
+                  const selected = mode === m.id;
+                  return (
+                    <li key={m.id}>
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        className={`composer-mode-option ${selected ? "is-active" : ""}`}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setMode(m.id);
+                          setModeOpen(false);
+                          textRef.current?.focus();
+                        }}
+                      >
+                        <span className="composer-mode-option-text">
+                          <span className="composer-mode-option-label">{m.label}</span>
+                          <span className="composer-mode-option-hint">{m.hint}</span>
+                        </span>
+                        {selected && (
+                          <svg
+                            className="composer-mode-check"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 14 14"
+                            fill="none"
+                            aria-hidden
+                          >
+                            <path
+                              d="M2.5 7.2 5.6 10.2 11.5 3.8"
+                              stroke="currentColor"
+                              strokeWidth="1.7"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+
           <textarea
             ref={textRef}
             value={text}
             onChange={(e) => {
               setText(e.target.value);
               setShowSuggest(true);
+              setModeOpen(false);
               if (result?.intent === "refuse") setResult(null);
             }}
             rows={1}
             enterKeyHint="send"
-            placeholder={hasSearchAnswer ? "Уточните или задайте новый вопрос…" : "Спросите Chronicum или вставьте ссылку…"}
+            placeholder={composerPlaceholder}
             className="composer-input max-h-40 min-h-[44px] w-full resize-none overflow-hidden bg-transparent py-2.5 outline-none placeholder:text-[var(--muted)]"
-            onFocus={() => setShowSuggest(true)}
+            onFocus={() => {
+              setShowSuggest(true);
+              setModeOpen(false);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Escape") {
                 setShowSuggest(false);
+                setModeOpen(false);
                 if (result?.intent === "refuse") setResult(null);
                 return;
               }
@@ -280,7 +416,7 @@ export default function HomePage() {
             type="submit"
             disabled={busy || !text.trim()}
             aria-label={busy ? "Отправка" : "Отправить"}
-            className="mb-1 flex h-11 min-w-11 shrink-0 items-center justify-center rounded-full border border-[var(--accent)] bg-[var(--accent)] px-3.5 text-sm text-[var(--btn-fg)] disabled:opacity-40"
+            className="composer-send mb-1 flex h-11 min-w-11 shrink-0 items-center justify-center rounded-full border border-[var(--accent)] bg-[var(--accent)] px-3.5 text-sm text-[var(--btn-fg)] disabled:opacity-40"
           >
             {busy ? "…" : "↑"}
           </button>
@@ -310,7 +446,7 @@ export default function HomePage() {
 
         {!hasSearchAnswer && !suggestOpen && !refuseMessage && (
           <p className="composer-kbd-hint composer-kbd-desktop mt-3 text-center text-xs text-[var(--muted)]">
-            Enter — отправить · Shift+Enter — новая строка
+            {activeMode.hint} · Enter — отправить · Shift+Enter — новая строка
           </p>
         )}
       </form>

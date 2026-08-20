@@ -10,6 +10,7 @@ class MaterialListItem(BaseModel):
     id: str
     title: str | None
     source_type: str
+    entry_kind: str = "knowledge"
     source_url: str | None
     summary: str | None
     main_idea: str | None
@@ -71,6 +72,10 @@ class CategoryCreate(BaseModel):
 
 class ComposerRequest(BaseModel):
     text: str = Field(..., min_length=1)
+    mode: str = Field(
+        default="auto",
+        description="auto | ask | knowledge | task | rule",
+    )
 
 
 class TtsRequest(BaseModel):
@@ -159,6 +164,7 @@ class PersonalProfile(BaseModel):
 class AppSettingsOut(BaseModel):
     default_depth: str = "standard"  # compact | standard | detailed
     auto_moments: bool = True
+    video_full: bool = True
     moments_vision_gate: bool = False
     provider_order: list[str] = Field(default_factory=lambda: ["groq", "google"])
     personal_profile: PersonalProfile = Field(default_factory=PersonalProfile)
@@ -167,6 +173,7 @@ class AppSettingsOut(BaseModel):
 class AppSettingsUpdate(BaseModel):
     default_depth: str | None = None
     auto_moments: bool | None = None
+    video_full: bool | None = None
     moments_vision_gate: bool | None = None
     personal_profile: PersonalProfile | None = None
 

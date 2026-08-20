@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
 
 from app.logging_setup import get_logger
+from app.pipelines.browser_cookies import cookie_header, netscape_cookies_for_host
+from app.pipelines.media_bundle import MediaBundle
 
 log = get_logger(__name__)
 
@@ -77,24 +78,159 @@ def _title_from(obj, fallback: str) -> str:
     return fallback
 
 
-def download_instagram_public(url: str, dest_dir: Path) -> tuple[str, str, float]:
-    """
-    Download a public Reel/Post video without account cookies.
-    Returns (local_path, title, duration_seconds).
-    """
+def collect_instagram_assets(media: dict) -> list[tuple[str, str]]:
+    """Return (kind, url) where kind is video|image. Handles reels and carousels."""
+    if not isinstance(media, dict):
+        return []
+    edges = ((media.get("edge_sidecar_to_children") or {}).get("edges")) or []
+    if edges:
+        out: list[tuple[str, str]] = []
+        for edge in edges:
+            node = (edge or {}).get("node") or {}
+            if isinstance(node, dict):
+                out.extend(_node_assets(node))
+        return out
+    carousel = media.get("carousel_media")
+    if isinstance(carousel, list) and carousel:
+        out = []
+        for node in carousel:
+            if isinstance(node, dict):
+                out.extend(_node_assets(node))
+        return out
+    return _node_assets(media)
+
+
+def _node_assets(node: dict) -> list[tuple[str, str]]:
+    video = node.get("video_url")
+    if not video:
+        versions = node.get("video_versions") or []
+        if versions and isinstance(versions[0], dict):
+            video = versions[0].get("url")
+    if video or node.get("is_video"):
+        if video:
+            return [("video", str(video))]
+    display = node.get("display_url")
+    if not display:
+        cands = ((node.get("image_versions2") or {}).get("candidates")) or []
+        if cands and isinstance(cands[0], dict):
+            display = cands[0].get("url")
+    if display:
+        return [("image", str(display))]
+    return []
+
+
+def parse_instagram_html_assets(html: str) -> list[tuple[str, str]]:
+    """Sidecar / carousel URLs embedded in page JSON (not just og:image)."""
+    text = html or ""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(items: list[tuple[str, str]]) -> None:
+        for kind, src in items:
+            if not src or src in seen:
+                continue
+            seen.add(src)
+            found.append((kind, src))
+
+    start = 0
+    while True:
+        pos = text.find("edge_sidecar_to_children", start)
+        if pos < 0:
+            break
+        brace = text.find("{", pos)
+        if brace >= 0:
+            try:
+                blob, _ = json.JSONDecoder().raw_decode(text[brace:])
+                add(collect_instagram_assets({"edge_sidecar_to_children": blob}))
+            except json.JSONDecodeError:
+                pass
+        start = pos + 24
+        if len(found) >= 2:
+            return found
+
+    start = 0
+    while True:
+        pos = text.find("carousel_media", start)
+        if pos < 0:
+            break
+        bracket = text.find("[", pos)
+        if bracket >= 0:
+            try:
+                blob, _ = json.JSONDecoder().raw_decode(text[bracket:])
+                if isinstance(blob, list):
+                    add(collect_instagram_assets({"carousel_media": blob}))
+            except json.JSONDecodeError:
+                pass
+        start = pos + 14
+        if len(found) >= 2:
+            return found
+
+    return found
+
+
+def _apply_cookies(headers: dict[str, str], cookies_file: str) -> tuple[dict[str, str], dict[str, str]]:
+    jar = netscape_cookies_for_host(cookies_file, "instagram.com") if cookies_file else {}
+    header = cookie_header(cookies_file, "instagram.com") if cookies_file else ""
+    if header:
+        headers = {**headers, "Cookie": header}
+    return headers, jar
+
+
+def _download_url(client: httpx.Client, src: str, dest: Path, referer: str) -> None:
+    if src.startswith("//"):
+        src = "https:" + src
+    with client.stream("GET", src, headers=_headers(referer)) as resp:
+        resp.raise_for_status()
+        with dest.open("wb") as f:
+            for chunk in resp.iter_bytes():
+                f.write(chunk)
+
+
+def download_instagram_public(
+    url: str,
+    dest_dir: Path,
+    *,
+    cookies_file: str = "",
+) -> MediaBundle:
+    """Download a public Reel/Post (video and/or photo carousel)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     shortcode = extract_shortcode(url) or "media"
-    video_url: str | None = None
     title = f"instagram:{shortcode}"
     duration = 0.0
-    meta_blob: dict | list | None = None
+    assets: list[tuple[str, str]] = []
+    headers, jar = _apply_cookies(_headers(), cookies_file)
 
-    with httpx.Client(follow_redirects=True, timeout=45.0, headers=_headers()) as client:
-        # 1) HTML page — og:video / embedded JSON
-        page = client.get(url)
-        html = page.text or ""
+    with httpx.Client(follow_redirects=True, timeout=45.0, headers=headers, cookies=jar) as client:
+        pages = [url]
+        if shortcode != "media":
+            pages.append(f"https://www.instagram.com/p/{shortcode}/embed/captioned/")
+            pages.append(f"https://www.instagram.com/p/{shortcode}/embed/")
+        html = ""
+        for page_url in pages:
+            try:
+                page = client.get(page_url)
+                html = page.text or ""
+            except Exception as exc:
+                log.warning("instagram_page_failed", url=page_url[:80], error=str(exc)[:160])
+                continue
+            og_title = re.search(
+                r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+                html,
+                re.I,
+            )
+            if og_title:
+                title = og_title.group(1).replace("&amp;", "&")[:120]
+            parsed = parse_instagram_html_assets(html)
+            if parsed:
+                assets = parsed
+                break
 
-        og = re.search(
+        og_image = re.search(
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            html,
+            re.I,
+        )
+        og_video = re.search(
             r'<meta[^>]+property=["\']og:video["\'][^>]+content=["\']([^"\']+)["\']',
             html,
             re.I,
@@ -103,40 +239,8 @@ def download_instagram_public(url: str, dest_dir: Path) -> tuple[str, str, float
             html,
             re.I,
         )
-        if og:
-            video_url = og.group(1).replace("&amp;", "&")
 
-        og_title = re.search(
-            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
-            html,
-            re.I,
-        )
-        if og_title:
-            title = og_title.group(1).replace("&amp;", "&")[:120]
-
-        if not video_url:
-            for pattern in (
-                r'window\._sharedData\s*=\s*(\{.+?\});</script>',
-                r'<script type="application/ld\+json">(\{.*?\})</script>',
-                r'"video_url"\s*:\s*"([^"]+)"',
-            ):
-                m = re.search(pattern, html, re.S)
-                if not m:
-                    continue
-                if pattern.endswith('"([^"]+)"'):
-                    video_url = m.group(1).encode().decode("unicode_escape")
-                    break
-                try:
-                    meta_blob = json.loads(m.group(1))
-                    video_url = _find_video_url(meta_blob)
-                    title = _title_from(meta_blob, title)
-                    if video_url:
-                        break
-                except json.JSONDecodeError:
-                    continue
-
-        # 2) GraphQL persisted query (works for many public shortcodes)
-        if not video_url and shortcode != "media":
+        if shortcode != "media":
             gql = client.post(
                 "https://www.instagram.com/graphql/query",
                 data={
@@ -157,31 +261,44 @@ def download_instagram_public(url: str, dest_dir: Path) -> tuple[str, str, float
                     or (data.get("data") or {}).get("shortcode_media")
                 )
                 if media:
-                    meta_blob = media
-                    video_url = media.get("video_url") or _find_video_url(media)
                     title = _title_from(media, title)
                     duration = float(media.get("video_duration") or 0)
+                    gql_assets = collect_instagram_assets(media)
+                    if len(gql_assets) > len(assets):
+                        assets = gql_assets
             except Exception as e:
                 log.warning("instagram_gql_failed", error=str(e)[:200])
 
-        if not video_url:
+        if not assets:
+            if og_video:
+                assets = [("video", og_video.group(1).replace("&amp;", "&"))]
+            elif og_image:
+                assets = [("image", og_image.group(1).replace("&amp;", "&"))]
+
+        if not assets:
             raise RuntimeError(
-                "Публичная выгрузка Instagram не нашла video_url "
-                "(приватный ролик, rate-limit или смена API)."
+                "Публичная выгрузка Instagram не нашла видео/фото "
+                "(приватный пост, карусель закрыта, rate-limit или смена API)."
             )
 
-        # Resolve CDN
-        if video_url.startswith("//"):
-            video_url = "https:" + video_url
+        videos: list[str] = []
+        images: list[str] = []
+        for i, (kind, src) in enumerate(assets, start=1):
+            ext = ".mp4" if kind == "video" else ".jpg"
+            dest = dest_dir / f"{shortcode}_{i}{ext}"
+            try:
+                _download_url(client, src, dest, url)
+            except Exception as exc:
+                log.warning("instagram_asset_failed", index=i, error=str(exc)[:160])
+                continue
+            if not dest.exists() or dest.stat().st_size < 400:
+                continue
+            if kind == "video":
+                videos.append(str(dest))
+            else:
+                images.append(str(dest))
 
-        out = dest_dir / f"{shortcode}.mp4"
-        with client.stream("GET", video_url, headers=_headers(url)) as resp:
-            resp.raise_for_status()
-            with out.open("wb") as f:
-                for chunk in resp.iter_bytes():
-                    f.write(chunk)
+    if not videos and not images:
+        raise RuntimeError("Скачанные Instagram-файлы пустые")
 
-    if not out.exists() or out.stat().st_size < 1000:
-        raise RuntimeError("Скачанный Instagram-файл пустой или слишком маленький")
-
-    return str(out), title, duration
+    return MediaBundle(title=title, duration=duration, video_paths=videos, image_paths=images)

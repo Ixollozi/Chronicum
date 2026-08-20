@@ -10,7 +10,7 @@ import { MaterialProcessing } from "@/components/MaterialProcessing";
 import { MomentsGallery } from "@/components/MomentsGallery";
 import { RichText } from "@/components/RichText";
 import { TranscriptView } from "@/components/TranscriptView";
-import { StatusPill, cleanMetaPart, formatShortDate } from "@/components/MaterialRow";
+import { StatusPill, ENTRY_KIND_LABEL, cleanMetaPart, formatShortDate } from "@/components/MaterialRow";
 import {
   client,
   normalizeCodeBlocks,
@@ -21,6 +21,7 @@ import {
 const SOURCE_LABEL: Record<string, string> = {
   youtube: "YouTube",
   instagram: "Instagram",
+  tiktok: "TikTok",
   video: "Видео",
   article: "Статья",
   note: "Заметка",
@@ -92,8 +93,19 @@ export default function MaterialPage() {
       return [{ id: "overview", label: "Обзор" }];
     }
     const list: Slide[] = [{ id: "overview", label: "Обзор" }];
-    if (m.key_ideas?.length) list.push({ id: "ideas", label: "Идеи" });
-    if (m.practical_takeaways?.length) list.push({ id: "takeaways", label: "Выводы" });
+    const kind = m.entry_kind || "knowledge";
+    if (m.key_ideas?.length) {
+      list.push({
+        id: "ideas",
+        label: kind === "task" ? "Шаги" : kind === "rule" ? "Примеры" : "Идеи",
+      });
+    }
+    if (m.practical_takeaways?.length) {
+      list.push({
+        id: "takeaways",
+        label: kind === "task" ? "Блокеры" : kind === "rule" ? "Антипримеры" : "Выводы",
+      });
+    }
     if (normalizeCodeBlocks(m.code_blocks).length) list.push({ id: "code", label: "Код" });
     if (normalizeMaterialLinks(m.links).length) list.push({ id: "links", label: "Ссылки" });
     if (m.objective_evaluation) list.push({ id: "evaluation", label: "Оценка" });
@@ -207,13 +219,25 @@ export default function MaterialPage() {
     );
   }
 
-  const isVideo = ["youtube", "instagram", "video"].includes(m.source_type);
+  const isVideo = ["youtube", "instagram", "tiktok", "video"].includes(m.source_type);
+  const entryKind = m.entry_kind || "knowledge";
   const digest = m.digest || m.summary;
   const evalObj = m.objective_evaluation;
   const source = SOURCE_LABEL[m.source_type] || m.source_type;
+  const kindLabel = ENTRY_KIND_LABEL[entryKind] || null;
   const category = cleanMetaPart(m.category);
   const isProcessing = ["queued", "processing"].includes(m.processing_status);
   const cardReady = !isProcessing && m.processing_status !== "failed";
+  const digestKicker =
+    entryKind === "task" ? "Чеклист" : entryKind === "rule" ? "Формула" : "Выжимка";
+  const ideasKicker =
+    entryKind === "task" ? "Шаги" : entryKind === "rule" ? "Примеры" : "Ключевые идеи";
+  const takeawaysKicker =
+    entryKind === "task"
+      ? "Блокеры и сроки"
+      : entryKind === "rule"
+        ? "Антипримеры"
+        : "Практические выводы";
 
   if (!cardReady) {
     return (
@@ -354,6 +378,9 @@ export default function MaterialPage() {
                 {m.title || "Без названия"}
               </h1>
               <div className="deck-meta">
+                {kindLabel && kindLabel !== "Знание" && (
+                  <span className="deck-meta-chip">{kindLabel}</span>
+                )}
                 <span className="deck-meta-chip">{source}</span>
                 {category && <span className="deck-meta-chip">{category}</span>}
                 {dateLabel && <span className="deck-meta-chip">{dateLabel}</span>}
@@ -387,7 +414,7 @@ export default function MaterialPage() {
 
                 {digest && (
                   <div className="deck-digest">
-                    <p className="deck-kicker">Выжимка</p>
+                    <p className="deck-kicker">{digestKicker}</p>
                     {digestAsList ? (
                       <ul className="deck-bullets">
                         {lines.map((line) => (
@@ -611,7 +638,7 @@ export default function MaterialPage() {
         return (
           <div className="deck-slide-inner">
             <header className="deck-slide-head">
-              <p className="deck-kicker">Ключевые идеи</p>
+              <p className="deck-kicker">{ideasKicker}</p>
               <span className="deck-slide-count">{m.key_ideas.length}</span>
             </header>
             <ol className="deck-ideas">
@@ -629,7 +656,7 @@ export default function MaterialPage() {
         return (
           <div className="deck-slide-inner">
             <header className="deck-slide-head">
-              <p className="deck-kicker">Практические выводы</p>
+              <p className="deck-kicker">{takeawaysKicker}</p>
               <span className="deck-slide-count">{m.practical_takeaways.length}</span>
             </header>
             <ul className="deck-takeaways">

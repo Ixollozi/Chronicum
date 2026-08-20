@@ -123,7 +123,7 @@ async def process_material_job(ctx, material_id: str, force_full: bool = False) 
             if not material:
                 return
 
-            if material.source_type in {"youtube", "instagram", "video"}:
+            if material.source_type in {"youtube", "instagram", "tiktok", "video"}:
                 lock_acquired = bool(await r.set(VIDEO_LOCK_KEY, material_id, nx=True, ex=3600))
                 if not lock_acquired:
                     # Another video job holds the lock — requeue shortly

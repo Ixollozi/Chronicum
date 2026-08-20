@@ -6,10 +6,8 @@ import re
 
 INSTAGRAM = re.compile(r"(instagram\.com|instagr\.am)", re.I)
 YOUTUBE = re.compile(r"(youtube\.com|youtu\.be)", re.I)
-UNSUPPORTED = re.compile(
-    r"(tiktok\.com|vm\.tiktok\.com|facebook\.com/reel|fb\.watch)",
-    re.I,
-)
+TIKTOK = re.compile(r"(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)", re.I)
+UNSUPPORTED = re.compile(r"(facebook\.com/reel|fb\.watch)", re.I)
 
 
 class UnsupportedSourceError(ValueError):
@@ -22,6 +20,8 @@ def classify_url(url: str) -> str:
         return "instagram"
     if YOUTUBE.search(u):
         return "youtube"
+    if TIKTOK.search(u):
+        return "tiktok"
     if UNSUPPORTED.search(u):
         raise UnsupportedSourceError(
             "Этот источник по ссылке пока не поддерживается. "

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 
 from app.ai import get_transcribe_client
@@ -9,7 +10,7 @@ from app.logging_setup import get_logger
 from app.pipelines.article import extract_article
 from app.pipelines.image import extract_image_text
 from app.pipelines.pdf import extract_pdf_text
-from app.pipelines.youtube import prepare_url_audio
+from app.pipelines.youtube import download_media_bundle
 from app.services.media import (
     extract_audio,
     extract_audio_segment,
@@ -20,6 +21,22 @@ from app.services.resources import normalize_asr_glitches
 from app.services.screen_atlas import build_screen_atlas, format_timed_ocr_block
 
 log = get_logger(__name__)
+
+
+def _persist_slides(paths: list[str], dest_dir: str) -> list[str]:
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    out: list[str] = []
+    for i, raw in enumerate(paths, 1):
+        src = Path(raw)
+        if not src.exists():
+            continue
+        suffix = src.suffix.lower() if src.suffix else ".jpg"
+        target = dest / f"slide_{i:02d}{suffix}"
+        if src.resolve() != target.resolve():
+            shutil.copy2(src, target)
+        out.append(str(target))
+    return out
 
 
 async def _whisper_client(settings: Settings):
@@ -115,20 +132,80 @@ async def extract_text_for_material(
             media_path,
         )
 
-    if source_type in {"youtube", "instagram", "video"}:
-        if source_type in {"youtube", "instagram"}:
+    if source_type in {"youtube", "instagram", "tiktok", "video"}:
+        if source_type in {"youtube", "instagram", "tiktok"}:
             assert source_url
-            label = "instagram" if source_type == "instagram" else "youtube"
-            audio_path, title, duration, media_path = await prepare_url_audio(source_url, label=label)
+            bundle = await download_media_bundle(source_url, label=source_type)
+            title = bundle.title
+            duration = bundle.duration or None
+            if bundle.image_paths:
+                slide_root = Path(atlas_dir).parent / "slides" if atlas_dir else Path(bundle.image_paths[0]).parent / "slides"
+                persisted = _persist_slides(bundle.image_paths, str(slide_root))
+                if persisted:
+                    bundle.image_paths = persisted
+            extras: list[str] = []
+            if bundle.caption.strip():
+                extras.append(bundle.caption.strip())
+            for i, img in enumerate(bundle.image_paths, 1):
+                slide = await extract_image_text(img)
+                extras.append(f"[Слайд {i}]\n{slide}")
+            extra_block = "\n\n".join(extras)
+
+            if not bundle.has_video:
+                media = bundle.image_paths[0] if bundle.image_paths else None
+                text = extra_block or title
+                return text, title, None, 0.0, media
+
+            client = await _whisper_client(settings)
+            chunks: list[str] = []
+            audio_sec = 0.0
+            for vi, vp in enumerate(bundle.video_paths, 1):
+                audio_path = str(Path(vp).with_suffix(".mp3"))
+                try:
+                    audio_path = await extract_audio(vp, audio_path)
+                except Exception:
+                    audio_path = vp
+                tr = await client.transcribe(audio_path, language="auto")
+                piece = normalize_asr_glitches(tr.text)
+                piece = await localize_transcript_to_russian(
+                    piece, language=getattr(tr, "language", None), session=session
+                )
+                if len(bundle.video_paths) > 1:
+                    chunks.append(f"[Видео {vi}]\n{piece}")
+                else:
+                    chunks.append(piece)
+                audio_sec += tr.audio_seconds or 0
+            text = "\n\n".join(chunks)
+            if extra_block:
+                text = f"{text}\n\n{extra_block}"
+
+            media_path = bundle.video_path
             video_for_frames = media_path
-        else:
-            assert file_path
-            title = Path(file_path).name
-            duration = await probe_duration_seconds(file_path)
-            audio_path = str(Path(file_path).with_suffix(".mp3"))
-            audio_path = await extract_audio(file_path, audio_path)
-            video_for_frames = file_path
-            media_path = file_path
+            out_atlas = atlas_dir
+            if not out_atlas and video_for_frames:
+                out_atlas = str(Path(video_for_frames).with_name(Path(video_for_frames).stem + "_atlas"))
+            try:
+                atlas_frames = await build_screen_atlas(
+                    video_for_frames,
+                    out_atlas,
+                    duration=duration,
+                    source_type=source_type,
+                    keep_top_n=24,
+                )
+                ocr_block = format_timed_ocr_block(atlas_frames)
+                if ocr_block:
+                    text = f"{text}\n\n{ocr_block}"
+            except Exception as e:
+                log.warning("screen_atlas_failed", error=str(e)[:300])
+            return text, title, duration, audio_sec, media_path
+
+        assert file_path
+        title = Path(file_path).name
+        duration = await probe_duration_seconds(file_path)
+        audio_path = str(Path(file_path).with_suffix(".mp3"))
+        audio_path = await extract_audio(file_path, audio_path)
+        video_for_frames = file_path
+        media_path = file_path
 
         threshold_sec = settings.video_preview_threshold_min * 60
         is_long = (duration or 0) > threshold_sec
@@ -138,7 +215,7 @@ async def extract_text_for_material(
         if do_preview and duration:
             seg_dur = max(30.0, duration * settings.video_preview_fraction)
             seg_path = str(Path(audio_path).with_name(Path(audio_path).stem + "_preview.mp3"))
-            src_for_cut = video_for_frames if source_type == "video" else audio_path
+            src_for_cut = video_for_frames
             try:
                 await extract_audio_segment(src_for_cut, 0, seg_dur, seg_path)
                 tr = await client.transcribe(seg_path, language="auto")
@@ -177,7 +254,6 @@ async def extract_text_for_material(
             if ocr_block:
                 text = f"{text}\n\n{ocr_block}"
             else:
-                # Fallback sparse keyframes if atlas empty
                 frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_frames"))
                 frames = await extract_keyframes(video_for_frames, frames_dir)
                 ocr = await ocr_frames(frames)

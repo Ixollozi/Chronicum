@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -42,4 +43,22 @@ def text_sha256(text: str) -> str:
 
 
 def url_sha256(url: str) -> str:
-    return hashlib.sha256(url.strip().encode("utf-8")).hexdigest()
+    return hashlib.sha256(_canonical_url(url).encode("utf-8")).hexdigest()
+
+
+_YOUTUBE_ID = re.compile(
+    r"(?:youtube\.com/(?:watch\?.*?v=|shorts/|embed/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})",
+    re.I,
+)
+_TIKTOK_POST = re.compile(r"tiktok\.com/@[^/]+/(?:video|photo)/(\d+)", re.I)
+
+
+def _canonical_url(url: str) -> str:
+    raw = (url or "").strip()
+    match = _YOUTUBE_ID.search(raw)
+    if match:
+        return f"youtube:{match.group(1)}"
+    match = _TIKTOK_POST.search(raw)
+    if match:
+        return f"tiktok:{match.group(1)}"
+    return raw.rstrip("/")

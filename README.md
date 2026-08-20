@@ -11,6 +11,7 @@ Post-MVP: [ROADMAP_POST_MVP.md](ROADMAP_POST_MVP.md). Лимиты: [GROQ_LIMITS
 |---|---|
 | **Веб** http://127.0.0.1:3000 | Каталог, карточка, загрузка, NL-поиск |
 | **Telegram-бот** | Быстрый intake |
+| **MCP** [mcp/README.md](mcp/README.md) | Cursor / Claude / HTTP — нейронки ходят в базу, а не в папки проекта |
 
 ## Запуск без Docker — LITE (рекомендуется)
 
@@ -36,10 +37,11 @@ docker compose up --build -d
 
 ## Веб-страницы
 
-- `/` — каталог
-- `/add` — ссылка / заметка / файл
-- `/search` — вопрос к базе
+- `/` — спросить базу / сохранить ссылку или заметку
+- `/archive` — каталог
+- `/graph` — сеть тегов и категорий
 - `/m/[id]` — карточка
+- `/settings` — режимы, профиль, ключи, **подключение MCP к Cursor**
 
 ## Bot commands
 
@@ -52,15 +54,22 @@ docker compose up --build -d
 | `/score <id> <1-10>` | Оценка |
 | `/pending_tags` / `/approve_tag` | Теги |
 
-## Video two-stage
+## Video
 
-Короткие видео → full сразу. Длинные → preview (~20%) → full по порогу или команде/кнопке на сайте.
+По умолчанию Whisper расшифровывает **ролик целиком** (Настройки → Режимы → «Видео целиком»). Выключи тоггл, если нужен старый preview ~20% + full по кнопке.
 
 ## Backup
 
+Lite (SQLite):
+
+```powershell
+.\scripts\backup-lite.ps1
+```
+
+Postgres / Docker:
+
 ```bash
-# с Docker-контейнером postgres или локальный pg_dump
 ./scripts/backup_pg.sh
 ```
 
-Для локального Postgres без Docker выставь `DATABASE_URL` и используй `pg_dump` из PATH (скрипт сам уйдёт в fallback).
+Для локального Postgres без Docker выставь `DATABASE_URL` — скрипт уйдёт в `pg_dump`.

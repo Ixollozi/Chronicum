@@ -67,6 +67,7 @@ def to_list_item(m: Material) -> MaterialListItem:
         id=m.id,
         title=m.title,
         source_type=m.source_type,
+        entry_kind=getattr(m, "entry_kind", None) or "knowledge",
         source_url=m.source_url,
         summary=m.summary,
         main_idea=m.main_idea,
@@ -371,7 +372,7 @@ async def search(body: SearchRequest, session: AsyncSession = Depends(get_sessio
 @router.post("/composer", response_model=ComposerResponse)
 async def composer(body: ComposerRequest, session: AsyncSession = Depends(get_session)):
     try:
-        result = await run_composer(session, body.text)
+        result = await run_composer(session, body.text, mode=body.mode)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     sources: list[MaterialListItem] = []
@@ -506,6 +507,7 @@ async def patch_settings_api(body: AppSettingsUpdate, session: AsyncSession = De
             session,
             default_depth=body.default_depth,
             auto_moments=body.auto_moments,
+            video_full=body.video_full,
             moments_vision_gate=body.moments_vision_gate,
             personal_profile=body.personal_profile.model_dump() if body.personal_profile is not None else None,
         )

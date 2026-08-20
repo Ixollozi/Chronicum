@@ -13,12 +13,19 @@ export const STATUS_LABEL: Record<string, string> = {
 export const SOURCE_LABEL: Record<string, string> = {
   youtube: "YouTube",
   instagram: "Instagram",
+  tiktok: "TikTok",
   video: "Видео",
   article: "Статья",
   note: "Заметка",
   pdf: "PDF",
   voice: "Голос",
   file: "Файл",
+};
+
+export const ENTRY_KIND_LABEL: Record<string, string> = {
+  knowledge: "Знание",
+  task: "Задача",
+  rule: "Правило",
 };
 
 function statusDot(status: string): string {
@@ -81,8 +88,9 @@ export function MaterialRow({
   const score = item.usefulness_score;
   const dateLabel = formatShortDate(item.created_at);
   const source = SOURCE_LABEL[item.source_type] || item.source_type;
+  const kind = ENTRY_KIND_LABEL[item.entry_kind || ""] || null;
   const category = cleanMetaPart(item.category);
-  const meta = [source, category, dateLabel].filter(Boolean) as string[];
+  const meta = [kind && kind !== "Знание" ? kind : null, source, category, dateLabel].filter(Boolean) as string[];
 
   return (
     <div

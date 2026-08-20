@@ -40,7 +40,7 @@ async def _run_lite_job(material_id: str, force_full: bool = False) -> None:
                     )
                 ).scalars().first()
 
-            if material.source_type in {"youtube", "instagram", "video"}:
+            if material.source_type in {"youtube", "instagram", "tiktok", "video"}:
                 async with _video_lock:
                     material = await _process()
             else:

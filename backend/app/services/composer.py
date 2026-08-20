@@ -1,4 +1,4 @@
-"""Unified composer: URL / note / search, plus a thin jailbreak gate."""
+"""Unified composer: URL / note / search, plus entry modes (knowledge / task / rule)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging_setup import get_logger
-from app.models import ProcessingStatus
+from app.models import EntryKind, ProcessingStatus
 from app.search import answer_question
 from app.services.processing import create_material
 from app.services.queue import enqueue_material
@@ -48,8 +48,6 @@ QUESTION_START = (
     "find ",
 )
 
-# Minimal gate: block prompt-injection / jailbreak only.
-# Songs, code dumps, drafts, random notes — all allowed into the archive.
 JAILBREAK_RE = re.compile(
     r"(?is)"
     r"("
@@ -76,7 +74,27 @@ DEFAULT_REFUSE = (
     "Кинь материал в архив или спроси по базе."
 )
 
-Intent = Literal["url", "note", "search", "refuse"]
+ComposerMode = Literal["auto", "ask", "knowledge", "task", "rule"]
+Intent = Literal["url", "note", "search", "refuse", "task", "rule"]
+
+_MODE_ALIASES = {
+    "auto": "auto",
+    "ask": "ask",
+    "search": "ask",
+    "спросить": "ask",
+    "knowledge": "knowledge",
+    "знание": "knowledge",
+    "note": "knowledge",
+    "task": "task",
+    "задача": "task",
+    "rule": "rule",
+    "правило": "rule",
+}
+
+_SLASH_PREFIX = re.compile(
+    r"^\s*/(задача|task|правило|rule|знание|knowledge|спросить|ask|search)\s+",
+    re.I,
+)
 
 
 @dataclass
@@ -88,8 +106,21 @@ class ComposerResult:
     sources: list | None = None
 
 
+def normalize_mode(mode: str | None) -> ComposerMode:
+    key = (mode or "auto").strip().lower()
+    return _MODE_ALIASES.get(key, "auto")  # type: ignore[return-value]
+
+
+def strip_mode_prefix(text: str) -> tuple[str, ComposerMode | None]:
+    """Optional /задача … prefix when mode is auto."""
+    m = _SLASH_PREFIX.match(text or "")
+    if not m:
+        return (text or "").strip(), None
+    return text[m.end() :].strip(), normalize_mode(m.group(1))
+
+
 def classify_intent(text: str) -> Intent:
-    """Heuristic intent (URL / search / note)."""
+    """Heuristic intent (URL / search / note) for auto mode."""
     raw = text.strip()
     if not raw:
         return "note"
@@ -115,12 +146,67 @@ def is_jailbreak_attempt(text: str) -> bool:
     return bool(JAILBREAK_RE.search(text.strip()))
 
 
-async def run_composer(session: AsyncSession, text: str) -> ComposerResult:
-    text = text.strip()
+def _entry_kind_for_mode(mode: ComposerMode) -> str:
+    if mode == "task":
+        return EntryKind.TASK.value
+    if mode == "rule":
+        return EntryKind.RULE.value
+    return EntryKind.KNOWLEDGE.value
+
+
+async def _enqueue_url(session: AsyncSession, url: str, *, entry_kind: str) -> ComposerResult:
+    try:
+        source_type = classify_url(url)
+    except UnsupportedSourceError as e:
+        raise ValueError(str(e)) from e
+    material = await create_material(
+        session,
+        source_type=source_type,
+        source_url=url,
+        content_hash=url_sha256(url),
+        entry_kind=entry_kind,
+    )
+    if not (material.summary and material.processing_status == ProcessingStatus.DONE.value):
+        await enqueue_material(material.id)
+    label = {
+        EntryKind.TASK.value: "задача",
+        EntryKind.RULE.value: "правило",
+    }.get(entry_kind, source_type)
+    return ComposerResult(
+        intent="task" if entry_kind == EntryKind.TASK.value else ("rule" if entry_kind == EntryKind.RULE.value else "url"),
+        message=f"{label} принят в очередь",
+        material_id=material.id,
+    )
+
+
+async def _enqueue_note(session: AsyncSession, text: str, *, entry_kind: str) -> ComposerResult:
+    material = await create_material(
+        session,
+        source_type="note",
+        note_text=text,
+        content_hash=text_sha256(f"{entry_kind}:{text}"),
+        title=text[:80],
+        entry_kind=entry_kind,
+    )
+    if not (material.summary and material.processing_status == ProcessingStatus.DONE.value):
+        await enqueue_material(material.id)
+    if entry_kind == EntryKind.TASK.value:
+        return ComposerResult(intent="task", message="Задача принята в очередь", material_id=material.id)
+    if entry_kind == EntryKind.RULE.value:
+        return ComposerResult(intent="rule", message="Правило принято в очередь", material_id=material.id)
+    return ComposerResult(intent="note", message="Заметка принята в очередь", material_id=material.id)
+
+
+async def run_composer(
+    session: AsyncSession,
+    text: str,
+    *,
+    mode: str | None = "auto",
+) -> ComposerResult:
+    text = (text or "").strip()
     if not text:
         raise ValueError("Empty input")
 
-    # Thin safety net only — never block songs, code, drafts, offbeat notes.
     if is_jailbreak_attempt(text):
         log.info("composer_refused", kind="jailbreak", chars=len(text))
         return ComposerResult(
@@ -130,29 +216,45 @@ async def run_composer(session: AsyncSession, text: str) -> ComposerResult:
             sources=[],
         )
 
-    intent = classify_intent(text)
+    resolved = normalize_mode(mode)
+    body, slash_mode = strip_mode_prefix(text)
+    if resolved == "auto" and slash_mode:
+        resolved = slash_mode
+        text = body
+    elif resolved != "auto" and slash_mode:
+        # Explicit chip wins; still strip accidental slash prefix
+        text = body or text
 
+    if not text:
+        raise ValueError("Empty input")
+
+    if resolved == "ask":
+        answer, materials = await answer_question(session, text)
+        return ComposerResult(
+            intent="search",
+            message="Ответ по базе",
+            answer=answer,
+            sources=materials,
+        )
+
+    entry_kind = _entry_kind_for_mode(resolved)
+
+    if resolved in {"task", "rule", "knowledge"}:
+        url_match = URL_RE.search(text)
+        if url_match:
+            url = url_match.group(0).rstrip(").,]\"'")
+            cleaned = text.strip()
+            if cleaned == url or (len(cleaned) < 280 and cleaned.startswith("http")):
+                return await _enqueue_url(session, url, entry_kind=entry_kind)
+        return await _enqueue_note(session, text, entry_kind=entry_kind)
+
+    # auto
+    intent = classify_intent(text)
     if intent == "url":
         m = URL_RE.search(text)
         assert m
         url = m.group(0).rstrip(").,]\"'")
-        try:
-            source_type = classify_url(url)
-        except UnsupportedSourceError as e:
-            raise ValueError(str(e)) from e
-        material = await create_material(
-            session,
-            source_type=source_type,
-            source_url=url,
-            content_hash=url_sha256(url),
-        )
-        if not (material.summary and material.processing_status == ProcessingStatus.DONE.value):
-            await enqueue_material(material.id)
-        return ComposerResult(
-            intent="url",
-            message=f"{source_type} принят в очередь",
-            material_id=material.id,
-        )
+        return await _enqueue_url(session, url, entry_kind=EntryKind.KNOWLEDGE.value)
 
     if intent == "search":
         answer, materials = await answer_question(session, text)
@@ -163,17 +265,4 @@ async def run_composer(session: AsyncSession, text: str) -> ComposerResult:
             sources=materials,
         )
 
-    material = await create_material(
-        session,
-        source_type="note",
-        note_text=text,
-        content_hash=text_sha256(text),
-        title=text[:80],
-    )
-    if not (material.summary and material.processing_status == ProcessingStatus.DONE.value):
-        await enqueue_material(material.id)
-    return ComposerResult(
-        intent="note",
-        message="Заметка принята в очередь",
-        material_id=material.id,
-    )
+    return await _enqueue_note(session, text, entry_kind=EntryKind.KNOWLEDGE.value)

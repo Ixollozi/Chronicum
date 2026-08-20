@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { BrandMark } from "@/components/BrandMark";
 import { getToken, setToken } from "@/lib/api";
 
 const NAV = [
@@ -75,7 +76,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   if (!ready) {
     return (
-      <main className="relative z-10 mx-auto flex min-h-[100dvh] max-w-lg items-center justify-center px-6">
+      <main className="relative z-10 mx-auto flex min-h-[100dvh] max-w-lg flex-col items-center justify-center gap-3 px-6">
+        <BrandMark size={48} className="animate-fade rounded-2xl" priority />
         <p className="text-sm text-[var(--muted)] animate-fade">Chronicum</p>
       </main>
     );
@@ -84,6 +86,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   if (!authed) {
     return (
       <main className="relative z-10 mx-auto flex min-h-[100dvh] max-w-lg flex-col justify-center px-6 py-16">
+        <BrandMark size={56} className="mb-6 animate-fade rounded-2xl" priority />
         <p className="mb-3 text-[11px] uppercase tracking-[0.28em] text-[var(--muted)] animate-fade">
           Personal knowledge
         </p>

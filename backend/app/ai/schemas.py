@@ -177,11 +177,16 @@ class KnowledgeCard(BaseModel):
             cleaned_ideas.append(idea_s)
 
         if len(cleaned_ideas) < 2 and dig_lines:
-            for p in _DEFAULT_PRINCIPLES:
-                if p not in cleaned_ideas:
-                    cleaned_ideas.append(p)
-                if len(cleaned_ideas) >= 3:
-                    break
+            dig_l = (self.digest or "").lower()
+            mediaish = any(
+                t in dig_l for t in ("b-roll", "монтаж", "кадр", "ролик", "видео", "reel", "тикток")
+            )
+            if mediaish:
+                for p in _DEFAULT_PRINCIPLES:
+                    if p not in cleaned_ideas:
+                        cleaned_ideas.append(p)
+                    if len(cleaned_ideas) >= 3:
+                        break
         self.key_ideas = cleaned_ideas[:6]
 
         # Soft-dedupe takeaways vs digest
