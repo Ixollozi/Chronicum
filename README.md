@@ -27,6 +27,12 @@ cd D:\Cursor\Chronicum
 
 Full-режим (Postgres+Redis): `.\scripts\setup-local.ps1` + `.\scripts\start-local.ps1`.
 
+## С телефона (та же Wi‑Fi)
+
+Слушай `0.0.0.0` (API `:8010`, Next `:3000`), открой firewall TCP **3000** / **8010**.  
+Для Google OAuth нужен хост `http://<LAN-IP>.nip.io` (сырой LAN IP Google не принимает).  
+Подробно: [docs/LOCAL_LAN_PHONE.md](docs/LOCAL_LAN_PHONE.md).
+
 ## Запуск через Docker (опционально)
 
 В `.env` раскомментируй docker-hostnames (`@postgres`, `@redis`, `STORAGE_PATH=/data/files`), затем:
