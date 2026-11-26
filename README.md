@@ -44,6 +44,12 @@ cd web && npm install && npm run dev
 
 Full-режим (Postgres + Redis + ARQ): `.\scripts\setup-local.ps1` + `.\scripts\start-local.ps1` (или `CHRONICUM_LITE=false` с `DATABASE_URL` на PostgreSQL и запущенным `arq app.workers.settings.WorkerSettings`).
 
+## С телефона (та же Wi‑Fi)
+
+Слушай `0.0.0.0` (API `:8000` или `:8010`, Next `:3000`), открой Windows Firewall TCP **3000** / **8000** (или **8010**).  
+Укажи `NEXT_PUBLIC_API_URL=http://<LAN-IP>:8000` в `web/.env.local`, добавь `http://<LAN-IP>:3000` в `CORS_ORIGINS` (`.env`) и войди по `WEB_API_TOKEN` (Bearer).  
+Подробно: [docs/LOCAL_LAN_PHONE.md](docs/LOCAL_LAN_PHONE.md).
+
 ## Запуск через Docker (опционально)
 
 В `.env` укажи docker-hostnames (`@postgres`, `@redis`, `STORAGE_PATH=/data/files`), затем:
