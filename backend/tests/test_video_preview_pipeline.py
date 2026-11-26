@@ -22,6 +22,7 @@ def _settings(threshold_min: int = 10, preview_fraction: float = 0.15) -> Simple
 def _stub_common_pipeline_deps(monkeypatch, tmp_path, *, transcribe_mock: AsyncMock):
     client = SimpleNamespace(transcribe=transcribe_mock)
     monkeypatch.setattr(pipelines_mod, "_whisper_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(pipelines_mod, "fetch_youtube_captions", AsyncMock(return_value=None))
     monkeypatch.setattr(
         "app.services.localize.localize_transcript_to_russian",
         AsyncMock(side_effect=lambda text, **_kw: text),

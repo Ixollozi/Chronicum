@@ -248,7 +248,11 @@ async def resolve_tag(
     return tag
 
 
-async def merge_duplicate_taxonomy(session: AsyncSession) -> dict[str, int]:
+async def merge_duplicate_taxonomy(
+    session: AsyncSession,
+    *,
+    promote_pending: bool = False,
+) -> dict[str, int]:
     """One-shot cleanup: merge tags/categories that share the same normalize key."""
     tags = (await session.execute(select(Tag).order_by(Tag.id))).scalars().all()
     by_key: dict[str, list[Tag]] = {}
@@ -260,6 +264,8 @@ async def merge_duplicate_taxonomy(session: AsyncSession) -> dict[str, int]:
         for key, group in by_key.items():
             if not key or len(group) < 2:
                 continue
+            has_approved = any(t.status == TagStatus.APPROVED.value for t in group)
+            has_pending = any(t.status == TagStatus.PENDING.value for t in group)
             group.sort(
                 key=lambda t: (
                     0
@@ -284,8 +290,11 @@ async def merge_duplicate_taxonomy(session: AsyncSession) -> dict[str, int]:
                 )
             )
             keep = group[0]
-            if keep.status != TagStatus.REJECTED.value:
+            if has_approved:
                 keep.status = TagStatus.APPROVED.value
+            elif has_pending:
+                keep.status = TagStatus.PENDING.value
+            keep_is_pending = keep.status == TagStatus.PENDING.value
             for dup in group[1:]:
                 links = (
                     await session.execute(select(MaterialTag).where(MaterialTag.tag_id == dup.id))
@@ -303,7 +312,7 @@ async def merge_duplicate_taxonomy(session: AsyncSession) -> dict[str, int]:
                         await session.delete(link)
                     else:
                         link.tag_id = keep.id
-                        link.proposed = False
+                        link.proposed = keep_is_pending
                 await session.delete(dup)
                 tags_merged += 1
                 log.info("taxonomy_tag_merged", keep=keep.name, removed=dup.name, key=key)
@@ -352,19 +361,20 @@ async def merge_duplicate_taxonomy(session: AsyncSession) -> dict[str, int]:
             if keep.name != target_name:
                 keep.name = target_name
 
-        pending = (
-            await session.execute(select(Tag).where(Tag.status == TagStatus.PENDING.value))
-        ).scalars().all()
         promoted = 0
-        for t in pending:
-            t.status = TagStatus.APPROVED.value
-            promoted += 1
-        if promoted:
-            links = (
-                await session.execute(select(MaterialTag).where(MaterialTag.proposed.is_(True)))
+        if promote_pending:
+            pending = (
+                await session.execute(select(Tag).where(Tag.status == TagStatus.PENDING.value))
             ).scalars().all()
-            for link in links:
-                link.proposed = False
+            for t in pending:
+                t.status = TagStatus.APPROVED.value
+                promoted += 1
+            if promoted:
+                links = (
+                    await session.execute(select(MaterialTag).where(MaterialTag.proposed.is_(True)))
+                ).scalars().all()
+                for link in links:
+                    link.proposed = False
 
     await session.flush()
     return {"tags_merged": tags_merged, "categories_merged": cats_merged, "pending_promoted": promoted}

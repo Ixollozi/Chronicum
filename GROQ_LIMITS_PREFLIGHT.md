@@ -1,15 +1,11 @@
-# Groq limits — pre-flight для MVP
+# Groq limits — pre-flight и защитные механизмы
 
-**Дата сверки публичной доки:** 2026-08-06  
 **Источник:** [console.groq.com/docs/rate-limits](https://console.groq.com/docs/rate-limits)  
-**Аккаунт:** лимиты org-level; точные цифры смотреть в [console.groq.com/settings/limits](https://console.groq.com/settings/limits) — они имеют приоритет над этой таблицей.
-
-Код `.env.example` создан с дефолтом `llama-3.3-70b-versatile` (сверка публичной доки 2026-08-06). Перед продомом подтверди цифры в своей консоли.
-
+**Аккаунт:** лимиты задаются на уровне организации; актуальные значения смотри в [console.groq.com/settings/limits](https://console.groq.com/settings/limits) — они имеют приоритет над ориентиром ниже.
 
 ---
 
-## Ориентир Free Plan (публичная дока Groq)
+## Ориентир Free Plan (публичная документация Groq)
 
 | Model ID | RPM | RPD | TPM | TPD | ASH | ASD |
 |---|---|---|---|---|---|---|
@@ -18,34 +14,38 @@
 | `llama-3.3-70b-versatile` | 30 | **1K** | 12K | 100K | — | — |
 | `llama-3.1-8b-instant` | 30 | **14.4K** | 6K | 500K | — | — |
 
-Whisper: ~2000 audio req/day и 7200 audio seconds/hour — комфортно для personal daily use.
-
-LLM: у 70B ниже RPD (1K/day), у 8B — сильно выше RPD, но слабее качество structured JSON. Для Chronicum (единицы–десятки материалов/день) **1K RPD на 70B достаточно**.
+- **Whisper:** ~2000 запросов/день, 7200 сек аудио/час и 28 800 сек/день; лимит размера одного файла — **25 МБ**.
+- **LLM:** у `llama-3.3-70b-versatile` лучше качество structured JSON, 1K RPD достаточно для персонального использования (единицы–десятки материалов в день). При регулярных 429 по RPD/TPD можно переключить `GROQ_LLM_MODEL` или добавить ключи / Gemini в пул.
 
 ---
 
-## Рекомендация до создания `.env.example`
+## Встроенная защита от лимитов в Chronicum
 
-| Env | Кандидат | Почему |
+| Механизм | Настройка | Что экономит |
 |---|---|---|
-| `TRANSCRIBE_PROVIDER` | `groq` | По ТЗ |
-| Whisper model | `whisper-large-v3` (или `whisper-large-v3-turbo` если нужен запас по скорости) | Free tier, без нагрузки на VPS |
-| `AI_PROVIDER` | `groq` | Primary; hot-swap `google` без смены кода |
-| `GROQ_LLM_MODEL` | **`llama-3.3-70b-versatile`** | Лучше для schema JSON; 1K RPD ок для personal use |
-| Fallback LLM | `llama-3.1-8b-instant` | Если в консоли у аккаунта 70B ужесточён или частые 429 по RPD/TPD |
-
-При устойчивых `429` / невалидном JSON → сменить модель через `.env` или `AI_PROVIDER=google`.
+| **YouTube captions first-pass** | `YOUTUBE_PREFER_CAPTIONS=true` | Берёт субтитры / автосубтитры без скачивания медиа и с **0 сек Whisper ASH**; fallback на Whisper только если субтитров нет |
+| **Чанкинг аудио перед Whisper** | `WHISPER_MAX_FILE_MB=20`, `WHISPER_CHUNK_SECONDS=600` | Не упирается в лимит 25 МБ на один файл при длинных видео и голосовых |
+| **Пул ключей + fallback на Gemini** | Веб → Настройки → Ключи / `GOOGLE_AI_API_KEY` | Все LLM-вызовы (анализ карточки, обогащение, NL-поиск) автоматически переключаются между ключами Groq и далее на Gemini при 429/квоте |
+| **Видео preview-режим (опционально)** | `VIDEO_PREVIEW_THRESHOLD_MIN=10`, `VIDEO_PREVIEW_FRACTION=0.2` | При выключенном тоггле «Видео целиком» для длинных роликов сначала разбирается ~20% длительности |
 
 ---
 
-## Чеклист (нужно сделать один раз под своим аккаунтом)
+## Рекомендуемые значения `.env`
 
-Перед тем как писать дефолт модели в `.env.example` при старте кода:
+| Env | Дефолт | Комментарий |
+|---|---|---|
+| `TRANSCRIBE_PROVIDER` | `groq` | Whisper через Groq (или локальный fallback через субтитры YouTube) |
+| `GROQ_WHISPER_MODEL` | `whisper-large-v3` | Можно сменить на `whisper-large-v3-turbo` ради скорости |
+| `AI_PROVIDER` | `groq` | Primary; автоматический fallback на `google`, если заданы ключи Gemini |
+| `GROQ_LLM_MODEL` | `llama-3.3-70b-versatile` | Лучше держит JSON-схему карточки; резерв — `llama-3.1-8b-instant` |
 
-- [ ] Открыть [console.groq.com/settings/limits](https://console.groq.com/settings/limits) под рабочим org
-- [ ] Сверить RPM/RPD/TPM/TPD для выбранной LLM (не полагаться только на статьи)
-- [ ] Сверить Whisper ASH/ASD
-- [ ] Подтвердить или сменить `GROQ_LLM_MODEL` относительно рекомендации выше
-- [ ] Записать в README дату проверки и model id
+---
 
-**Статус pre-flight в репо:** публичная дока сверена 2026-08-06; **account-specific confirm — TBD владельцем** при первом деплое ключа.
+## Чеклист проверки своего аккаунта Groq
+
+Выполни один раз при подключении боевого ключа:
+
+- [ ] Открыть [console.groq.com/settings/limits](https://console.groq.com/settings/limits) под своим org
+- [ ] Сверить актуальные RPM/RPD/TPM/TPD для `GROQ_LLM_MODEL`
+- [ ] Сверить Whisper ASH/ASD и при необходимости оставить `YOUTUBE_PREFER_CAPTIONS=true`
+- [ ] Добавить запасной `GOOGLE_AI_API_KEY` (в `.env` или Веб → Настройки → Ключи) для бесшовного fallback при 429

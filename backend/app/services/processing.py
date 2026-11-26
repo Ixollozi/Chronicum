@@ -16,6 +16,7 @@ from app.models import (
     MaterialTag,
     ProcessingStage,
     ProcessingStatus,
+    TagStatus,
 )
 from app.pipelines import extract_text_for_material
 from app.services.key_pool import any_provider_ready, get_app_settings
@@ -138,13 +139,17 @@ async def _apply_card(session: AsyncSession, material: Material, card, cat_map, 
             tag_name,
             tag_map,
             allow_create=True,
-            auto_approve=True,
+            auto_approve=False,
         )
         if not tag or tag.id in seen_tag_ids:
             continue
         seen_tag_ids.add(tag.id)
         session.add(
-            MaterialTag(material_id=material.id, tag_id=tag.id, proposed=False)
+            MaterialTag(
+                material_id=material.id,
+                tag_id=tag.id,
+                proposed=(tag.status == TagStatus.PENDING.value),
+            )
         )
 
 
@@ -156,9 +161,13 @@ async def _refresh_search_vector(session: AsyncSession, material_id: str) -> Non
             """
             UPDATE materials
             SET search_vector =
+              setweight(to_tsvector('russian', coalesce(title, '')), 'A') ||
               setweight(to_tsvector('simple', coalesce(title, '')), 'A') ||
+              setweight(to_tsvector('russian', coalesce(summary, '')), 'A') ||
               setweight(to_tsvector('simple', coalesce(summary, '')), 'A') ||
+              setweight(to_tsvector('russian', coalesce(main_idea, '')), 'B') ||
               setweight(to_tsvector('simple', coalesce(main_idea, '')), 'B') ||
+              setweight(to_tsvector('russian', coalesce(raw_text, '')), 'C') ||
               setweight(to_tsvector('simple', coalesce(raw_text, '')), 'C')
             WHERE id = :id
             """

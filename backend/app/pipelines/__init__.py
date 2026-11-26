@@ -10,7 +10,7 @@ from app.logging_setup import get_logger
 from app.pipelines.article import extract_article
 from app.pipelines.image import extract_image_text
 from app.pipelines.pdf import extract_pdf_text
-from app.pipelines.youtube import download_media_bundle
+from app.pipelines.youtube import download_media_bundle, fetch_youtube_captions
 from app.services.media import (
     extract_audio,
     extract_audio_segment,
@@ -280,6 +280,46 @@ async def extract_text_for_material(
         )
 
     if source_type in {"youtube", "instagram", "tiktok", "video"}:
+        if source_type == "youtube" and source_url and getattr(settings, "youtube_prefer_captions", True):
+            try:
+                captions = await fetch_youtube_captions(source_url)
+            except Exception as cap_err:
+                log.warning("youtube_captions_failed", error=str(cap_err)[:200])
+                captions = None
+            if captions and captions.segments:
+                from app.services.localize import localize_transcript_to_russian
+
+                total_duration = captions.duration if captions.duration > 0 else None
+                threshold_sec = settings.video_preview_threshold_min * 60
+                is_long = (total_duration or 0.0) > threshold_sec
+                do_preview = stage == "preview" and is_long and bool(total_duration)
+                if do_preview and total_duration:
+                    preview_budget = min(
+                        float(total_duration),
+                        max(30.0, float(total_duration) * settings.video_preview_fraction),
+                    )
+                    raw_cap = captions.format_text(max_seconds=preview_budget)
+                    if len(raw_cap.strip()) < 40:
+                        raw_cap = captions.format_text()
+                else:
+                    raw_cap = captions.format_text()
+
+                raw_cap = normalize_asr_glitches(raw_cap)
+                raw_cap = await localize_transcript_to_russian(
+                    raw_cap, language=captions.language, session=session
+                )
+                if captions.description.strip():
+                    raw_cap = f"{raw_cap}\n\n{captions.description.strip()}" if raw_cap else captions.description.strip()
+                log.info(
+                    "youtube_captions_used",
+                    language=captions.language,
+                    is_auto=captions.is_auto,
+                    duration=total_duration,
+                    stage=stage,
+                    chars=len(raw_cap),
+                )
+                return raw_cap, captions.title, total_duration, 0.0, None
+
         if source_type in {"youtube", "instagram", "tiktok"}:
             assert source_url
             try:

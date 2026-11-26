@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { client, getToken, type ApiKeyItem, type AppSettings, type PersonalProfile } from "@/lib/api";
+import {
+  client,
+  getToken,
+  type ApiKeyItem,
+  type AppSettings,
+  type PersonalProfile,
+  type TagItem,
+  type TagStatusValue,
+} from "@/lib/api";
 import {
   IDE_RULE,
   apiOrigin,
@@ -41,6 +49,12 @@ const TABS = [
     label: "Ключи",
     hint: "Пулы AI",
     tip: "API-ключи для AI. Groq — основной (быстро), Gemini — запасной, если Groq недоступен.",
+  },
+  {
+    id: "tags" as const,
+    label: "Теги",
+    hint: "Модерация",
+    tip: "Новые теги от ИИ сначала попадают на проверку. Одобренные остаются в архиве и переиспользуются, отклонённые не добавляются повторно.",
   },
   {
     id: "ide" as const,
@@ -161,10 +175,14 @@ function Tip({ text }: { text: string }) {
 }
 
 export default function SettingsPage() {
-  const [tab, setTab] = useState<"modes" | "context" | "keys" | "ide">("modes");
+  const [tab, setTab] = useState<"modes" | "context" | "keys" | "tags" | "ide">("modes");
   const [provider, setProvider] = useState<"groq" | "google">("groq");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [keys, setKeys] = useState<ApiKeyItem[]>([]);
+  const [tagStatus, setTagStatus] = useState<TagStatusValue>("pending");
+  const [tags, setTags] = useState<TagItem[]>([]);
+  const [pendingTagCount, setPendingTagCount] = useState<number>(0);
+  const [tagFlash, setTagFlash] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [label, setLabel] = useState("");
@@ -208,13 +226,29 @@ export default function SettingsPage() {
     setKeys(await client.listKeys(provider));
   }, [provider]);
 
+  const loadTags = useCallback(async () => {
+    const [list, pendingList] = await Promise.all([
+      client.listTags(tagStatus),
+      tagStatus === "pending" ? Promise.resolve(null) : client.listTags("pending"),
+    ]);
+    setTags(list);
+    setPendingTagCount(tagStatus === "pending" ? list.length : (pendingList?.length ?? 0));
+  }, [tagStatus]);
+
   useEffect(() => {
     loadSettings().catch((e) => setError(e instanceof Error ? e.message : "Ошибка"));
+    client
+      .listTags("pending")
+      .then((list) => setPendingTagCount(list.length))
+      .catch(() => undefined);
   }, [loadSettings]);
 
   useEffect(() => {
     if (tab === "keys") {
       loadKeys().catch((e) => setError(e instanceof Error ? e.message : "Ошибка"));
+    }
+    if (tab === "tags") {
+      loadTags().catch((e) => setError(e instanceof Error ? e.message : "Ошибка"));
     }
     if (tab === "ide") {
       client
@@ -222,7 +256,7 @@ export default function SettingsPage() {
         .then(setHealth)
         .catch(() => setHealth(null));
     }
-  }, [tab, loadKeys]);
+  }, [tab, loadKeys, loadTags]);
 
   const crmCount = keys.filter((k) => k.source === "crm").length;
   const poolCount = keys.length;
@@ -278,9 +312,11 @@ export default function SettingsPage() {
       ? "Короткие ответы — и ИИ оценивает материалы именно для тебя, а не «вообще»."
       : tab === "keys"
         ? "Сначала Groq, при исчерпании — Gemini. Ключи из интерфейса или .env."
-        : tab === "ide"
-          ? "Cursor ставится диплинком. MCP крутится на том же API, что и кабинет. User Rules IDE не умеет принимать с сайта — копируй текст."
-        : "Глубина разбора, автомоменты и расшифровка видео по умолчанию.";
+        : tab === "tags"
+          ? "Новые теги от ИИ ждут одобрения, чтобы словарь оставался чистым."
+          : tab === "ide"
+            ? "Cursor ставится диплинком. MCP крутится на том же API, что и кабинет. User Rules IDE не умеет принимать с сайта — копируй текст."
+            : "Глубина разбора, автомоменты и расшифровка видео по умолчанию.";
 
   return (
     <section className="settings-root animate-fade" data-tab={tab}>
@@ -321,7 +357,10 @@ export default function SettingsPage() {
           className="settings-tabs"
           role="tablist"
           aria-label="Разделы настроек"
-          style={{ ["--tab-i" as string]: tabIndex }}
+          style={{
+            ["--tab-i" as string]: tabIndex,
+            ["--tab-n" as string]: TABS.length,
+          }}
         >
           <span className="settings-tabs-thumb" aria-hidden="true" />
           {TABS.map((t) => (
@@ -336,10 +375,15 @@ export default function SettingsPage() {
                 setTab(t.id);
                 setError(null);
                 setCheckMsg(null);
+                setTagFlash(null);
               }}
             >
               <span className="settings-tab-label">{t.label}</span>
-              <span className="settings-tab-hint">{t.hint}</span>
+              <span className="settings-tab-hint">
+                {t.id === "tags" && pendingTagCount > 0
+                  ? `${pendingTagCount} на проверке`
+                  : t.hint}
+              </span>
             </button>
           ))}
         </div>
@@ -815,6 +859,193 @@ export default function SettingsPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {tab === "tags" && (
+        <div className="settings-panel settings-keys" key="tags">
+          <div className="settings-keys-head">
+            <div>
+              <p className="settings-kicker">Словарь тегов</p>
+              <h2 className="settings-section-title">Модерация тегов</h2>
+            </div>
+            <div className="settings-seg" role="tablist" aria-label="Статус тегов">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tagStatus === "pending"}
+                className="settings-seg-item"
+                data-active={tagStatus === "pending"}
+                onClick={() => {
+                  setTagStatus("pending");
+                  setTagFlash(null);
+                }}
+              >
+                На проверке{pendingTagCount > 0 ? ` (${pendingTagCount})` : ""}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tagStatus === "approved"}
+                className="settings-seg-item"
+                data-active={tagStatus === "approved"}
+                onClick={() => {
+                  setTagStatus("approved");
+                  setTagFlash(null);
+                }}
+              >
+                Одобренные
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tagStatus === "rejected"}
+                className="settings-seg-item"
+                data-active={tagStatus === "rejected"}
+                onClick={() => {
+                  setTagStatus("rejected");
+                  setTagFlash(null);
+                }}
+              >
+                Отклонённые
+              </button>
+            </div>
+          </div>
+
+          <p className="settings-keys-lead">
+            {tagStatus === "pending"
+              ? "Теги, предложенные ИИ при разборе материалов. В карточках они отмечены знаком «?»."
+              : tagStatus === "approved"
+                ? "Подтверждённые теги — ИИ переиспользует их автоматически."
+                : "Отклонённые теги больше не привязываются к новым материалам."}
+          </p>
+
+          <div className="settings-keys-actions">
+            {tagStatus === "pending" && tags.length > 0 && (
+              <button
+                type="button"
+                disabled={busy}
+                className="settings-btn primary"
+                onClick={async () => {
+                  setBusy(true);
+                  setError(null);
+                  setTagFlash(null);
+                  try {
+                    for (const t of tags) {
+                      await client.approveTag(t.id);
+                    }
+                    setTagFlash(`Одобрено: ${tags.length}`);
+                    await loadTags();
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : "Ошибка одобрения");
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                Одобрить все ({tags.length})
+              </button>
+            )}
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busy}
+              onClick={() => {
+                setTagFlash(null);
+                loadTags().catch((e) => setError(e instanceof Error ? e.message : "Ошибка"));
+              }}
+            >
+              Обновить
+            </button>
+            {tagFlash && <span className="settings-flash">{tagFlash}</span>}
+          </div>
+
+          <ul className="settings-key-list">
+            {tags.map((t) => (
+              <li
+                key={t.id}
+                className="settings-key-row"
+                data-disabled={t.status === "rejected"}
+              >
+                <div className="settings-key-main">
+                  <div className="settings-key-topline">
+                    <p className="settings-key-label">#{t.name}</p>
+                    <span className="settings-key-badge">
+                      {t.status === "pending"
+                        ? "на проверке"
+                        : t.status === "approved"
+                          ? "одобрен"
+                          : "отклонён"}
+                    </span>
+                  </div>
+                </div>
+                <div className="settings-key-actions">
+                  {t.status !== "approved" && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      className="settings-btn primary"
+                      onClick={async () => {
+                        setBusy(true);
+                        setError(null);
+                        setTagFlash(null);
+                        try {
+                          await client.approveTag(t.id);
+                          setTagFlash(`Тег #${t.name} одобрен`);
+                          await loadTags();
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : "Ошибка одобрения");
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      Одобрить
+                    </button>
+                  )}
+                  {t.status !== "rejected" && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      className="settings-btn danger"
+                      onClick={async () => {
+                        setBusy(true);
+                        setError(null);
+                        setTagFlash(null);
+                        try {
+                          await client.rejectTag(t.id);
+                          setTagFlash(`Тег #${t.name} отклонён`);
+                          await loadTags();
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : "Ошибка отклонения");
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      Отклонить
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+            {tags.length === 0 && (
+              <li className="settings-empty">
+                <p className="settings-empty-title" style={{ fontFamily: "var(--font-display)" }}>
+                  {tagStatus === "pending"
+                    ? "Нет тегов на проверке"
+                    : tagStatus === "approved"
+                      ? "Одобренных тегов пока нет"
+                      : "Отклонённых тегов нет"}
+                </p>
+                <p className="settings-empty-desc">
+                  {tagStatus === "pending"
+                    ? "Когда ИИ предложит новый тег при разборе материала, он появится здесь."
+                    : "Список обновится после разбора и модерации материалов."}
+                </p>
+              </li>
+            )}
+          </ul>
         </div>
       )}
 

@@ -18,14 +18,22 @@ _mcp_server, _mcp_asgi = build_mcp_asgi()
 async def lifespan(_app: FastAPI):
     if settings.is_lite:
         from app.db import init_lite_db
+        from app.services.queue import recover_lite_queue
 
         await init_lite_db()
+        await recover_lite_queue()
     manager = getattr(_mcp_server, "session_manager", None) if _mcp_server is not None else None
-    if manager is not None:
-        async with manager.run():
+    try:
+        if manager is not None:
+            async with manager.run():
+                yield
+        else:
             yield
-    else:
-        yield
+    finally:
+        if settings.is_lite:
+            from app.services.queue import shutdown_lite_queue
+
+            await shutdown_lite_queue()
 
 
 app = FastAPI(title="Chronicum", version="0.3.0", lifespan=lifespan)
