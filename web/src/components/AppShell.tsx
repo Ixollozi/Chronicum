@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
-import { getToken, setToken } from "@/lib/api";
+import { AUTH_CHANGED_EVENT, getToken, setToken, verifyToken } from "@/lib/api";
 
 const NAV = [
   { href: "/", label: "Главная", icon: "home" as const },
@@ -65,14 +65,49 @@ function NavIcon({ name, active }: { name: (typeof NAV)[number]["icon"]; active:
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [tokenInput, setTokenInput] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
   const [ready, setReady] = useState(false);
   const [authed, setAuthed] = useState(false);
 
   useEffect(() => {
-    const t = getToken();
-    setAuthed(Boolean(t));
-    setReady(true);
+    const sync = (ev?: Event) => {
+      const t = getToken();
+      setAuthed(Boolean(t));
+      const reason = (ev as CustomEvent<{ reason?: string }> | undefined)?.detail?.reason;
+      if (reason === "unauthorized") {
+        setAuthError("Токен отклонён сервером (401). Введите актуальный WEB_API_TOKEN.");
+      } else if (reason === "logout") {
+        setAuthError(null);
+      }
+      setReady(true);
+    };
+    sync();
+    window.addEventListener(AUTH_CHANGED_EVENT, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(AUTH_CHANGED_EVENT, sync);
+      window.removeEventListener("storage", sync);
+    };
   }, []);
+
+  async function onLogin(e: React.FormEvent) {
+    e.preventDefault();
+    if (authBusy) return;
+    const candidate = tokenInput.trim() || "chronicum-dev-token";
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      await verifyToken(candidate);
+      setToken(candidate);
+      setTokenInput("");
+      setAuthed(true);
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : "Не удалось проверить токен");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
 
   if (!ready) {
     return (
@@ -102,15 +137,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <form
           className="mt-10 space-y-4 animate-rise"
           style={{ animationDelay: "140ms" }}
-          onSubmit={(e) => {
-            e.preventDefault();
-            setToken(tokenInput.trim() || "chronicum-dev-token");
-            setAuthed(true);
-          }}
+          onSubmit={onLogin}
         >
           <label className="block text-sm text-[var(--muted)]">
             WEB_API_TOKEN
             <input
+              type="password"
               value={tokenInput}
               onChange={(e) => setTokenInput(e.target.value)}
               placeholder="chronicum-dev-token"
@@ -118,11 +150,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               className="mt-2 w-full border-b border-[var(--line)] bg-transparent px-0 py-3 text-base outline-none transition focus:border-[var(--accent)]"
             />
           </label>
+          {authError && (
+            <p className="text-sm text-[var(--danger,#e05d5d)]" role="alert">
+              {authError}
+            </p>
+          )}
           <button
             type="submit"
-            className="w-full rounded-[var(--radius-pill)] border border-[var(--accent)] bg-[var(--accent)] px-5 py-3 text-sm text-[var(--btn-fg)] transition hover:brightness-110"
+            disabled={authBusy}
+            className="w-full rounded-[var(--radius-pill)] border border-[var(--accent)] bg-[var(--accent)] px-5 py-3 text-sm text-[var(--btn-fg)] transition hover:brightness-110 disabled:opacity-60"
           >
-            Войти
+            {authBusy ? "Проверяю…" : "Войти"}
           </button>
         </form>
       </main>

@@ -27,39 +27,53 @@ SEED_CATEGORIES = [
 ]
 
 
+def _json_type():
+    return sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
+
+
+def _uuid_type():
+    return sa.String(36).with_variant(postgresql.UUID(as_uuid=False), "postgresql")
+
+
+def _tsvector_type():
+    return sa.Text().with_variant(postgresql.TSVECTOR(), "postgresql")
+
+
 def upgrade() -> None:
+    is_pg = op.get_bind().dialect.name == "postgresql"
+    now_default = sa.text("now()") if is_pg else sa.text("CURRENT_TIMESTAMP")
     op.create_table(
         "categories",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("name", sa.String(100), nullable=False, unique=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=now_default),
     )
     op.create_table(
         "tags",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("name", sa.String(100), nullable=False, unique=True),
         sa.Column("status", sa.String(20), server_default="pending"),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=now_default),
     )
     op.create_table(
         "materials",
-        sa.Column("id", postgresql.UUID(as_uuid=False), primary_key=True),
+        sa.Column("id", _uuid_type(), primary_key=True),
         sa.Column("title", sa.String(500)),
         sa.Column("source_type", sa.String(50), nullable=False),
         sa.Column("source_url", sa.String(2000)),
         sa.Column("content_hash", sa.String(64)),
         sa.Column("user_id", sa.Integer()),
         sa.Column("telegram_chat_id", sa.Integer()),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()")),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=now_default),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=now_default),
         sa.Column("raw_text", sa.Text()),
         sa.Column("summary", sa.Text()),
         sa.Column("main_idea", sa.Text()),
-        sa.Column("key_ideas", postgresql.JSONB(), server_default="[]"),
-        sa.Column("practical_takeaways", postgresql.JSONB(), server_default="[]"),
-        sa.Column("tools", postgresql.JSONB(), server_default="[]"),
-        sa.Column("technologies", postgresql.JSONB(), server_default="[]"),
-        sa.Column("links", postgresql.JSONB(), server_default="[]"),
+        sa.Column("key_ideas", _json_type(), server_default="[]"),
+        sa.Column("practical_takeaways", _json_type(), server_default="[]"),
+        sa.Column("tools", _json_type(), server_default="[]"),
+        sa.Column("technologies", _json_type(), server_default="[]"),
+        sa.Column("links", _json_type(), server_default="[]"),
         sa.Column("category_id", sa.Integer(), sa.ForeignKey("categories.id")),
         sa.Column("usefulness_score", sa.Integer()),
         sa.Column("usefulness_reason", sa.Text()),
@@ -72,24 +86,25 @@ def upgrade() -> None:
         sa.Column("usage_tokens_in", sa.Integer(), server_default="0"),
         sa.Column("usage_tokens_out", sa.Integer(), server_default="0"),
         sa.Column("usage_audio_seconds", sa.Float(), server_default="0"),
-        sa.Column("usage_meta", postgresql.JSONB(), server_default="{}"),
-        sa.Column("search_vector", postgresql.TSVECTOR()),
+        sa.Column("usage_meta", _json_type(), server_default="{}"),
+        sa.Column("search_vector", _tsvector_type()),
     )
     op.create_index("ix_materials_content_hash", "materials", ["content_hash"])
     op.create_index("ix_materials_user_id", "materials", ["user_id"])
-    op.create_index(
-        "ix_materials_search_vector",
-        "materials",
-        ["search_vector"],
-        postgresql_using="gin",
-    )
+    if is_pg:
+        op.create_index(
+            "ix_materials_search_vector",
+            "materials",
+            ["search_vector"],
+            postgresql_using="gin",
+        )
 
     op.create_table(
         "material_tags",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("material_id", postgresql.UUID(as_uuid=False), sa.ForeignKey("materials.id", ondelete="CASCADE")),
+        sa.Column("material_id", _uuid_type(), sa.ForeignKey("materials.id", ondelete="CASCADE")),
         sa.Column("tag_id", sa.Integer(), sa.ForeignKey("tags.id", ondelete="CASCADE")),
-        sa.Column("proposed", sa.Boolean(), server_default="false"),
+        sa.Column("proposed", sa.Boolean(), server_default=sa.text("false") if is_pg else sa.text("0")),
         sa.UniqueConstraint("material_id", "tag_id", name="uq_material_tag"),
     )
 
@@ -98,8 +113,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    is_pg = op.get_bind().dialect.name == "postgresql"
     op.drop_table("material_tags")
-    op.drop_index("ix_materials_search_vector", table_name="materials")
+    if is_pg:
+        op.drop_index("ix_materials_search_vector", table_name="materials")
     op.drop_index("ix_materials_user_id", table_name="materials")
     op.drop_index("ix_materials_content_hash", table_name="materials")
     op.drop_table("materials")

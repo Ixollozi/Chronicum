@@ -68,21 +68,24 @@ async def build_opinion(session: AsyncSession, material: Material) -> Material:
 def _gemini_grounded(api_key: str, model_name: str, prompt: str) -> tuple[str, list[str]]:
     import google.generativeai as genai
 
-    genai.configure(api_key=api_key)
+    from app.ai import _GEMINI_LOCK
 
-    # Gemini 2.x Google Search tool; fall back if unsupported
-    tools: list | None
-    try:
-        tools = [{"google_search": {}}]
-        model = genai.GenerativeModel(model_name=model_name, tools=tools)
-    except Exception:
+    with _GEMINI_LOCK:
+        genai.configure(api_key=api_key)
+
+        # Gemini 2.x Google Search tool; fall back if unsupported
+        tools: list | None
         try:
-            tools = [{"google_search_retrieval": {}}]
+            tools = [{"google_search": {}}]
             model = genai.GenerativeModel(model_name=model_name, tools=tools)
         except Exception:
-            model = genai.GenerativeModel(model_name=model_name)
+            try:
+                tools = [{"google_search_retrieval": {}}]
+                model = genai.GenerativeModel(model_name=model_name, tools=tools)
+            except Exception:
+                model = genai.GenerativeModel(model_name=model_name)
 
-    resp = model.generate_content(prompt)
+        resp = model.generate_content(prompt)
     text = (getattr(resp, "text", None) or "").strip()
     sources: list[str] = []
 

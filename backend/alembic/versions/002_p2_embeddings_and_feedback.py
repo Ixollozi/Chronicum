@@ -17,17 +17,23 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _json_type():
+    return sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
+
+
 def upgrade() -> None:
-    op.add_column("materials", sa.Column("embedding", postgresql.JSONB(), nullable=True))
+    is_pg = op.get_bind().dialect.name == "postgresql"
+    now_default = sa.text("now()") if is_pg else sa.text("CURRENT_TIMESTAMP")
+    op.add_column("materials", sa.Column("embedding", _json_type(), nullable=True))
     op.create_table(
         "search_feedback",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("query", sa.Text(), nullable=False),
         sa.Column("answer", sa.Text(), nullable=True),
-        sa.Column("source_ids", postgresql.JSONB(), server_default="[]"),
+        sa.Column("source_ids", _json_type(), server_default="[]"),
         sa.Column("helpful", sa.Boolean(), nullable=False),
         sa.Column("comment", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()")),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=now_default),
     )
 
 

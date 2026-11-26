@@ -1,6 +1,7 @@
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -11,21 +12,42 @@ class Base(DeclarativeBase):
     pass
 
 
+def configure_sqlite_engine(target_engine) -> None:
+    """Enable WAL, busy_timeout, foreign_keys, and NORMAL sync on every SQLite connection."""
+    sync_engine = getattr(target_engine, "sync_engine", target_engine)
+
+    @event.listens_for(sync_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_conn, _conn_record) -> None:
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=15000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            cursor.close()
+
+
 def _make_engine():
     settings = get_settings()
     url = settings.database_url
     kwargs: dict = {"pool_pre_ping": True}
-    if url.startswith("sqlite"):
+    is_sqlite = url.startswith("sqlite")
+    if is_sqlite:
         # Ensure parent dir exists for file DB
         if ":///" in url:
             raw = url.split(":///", 1)[1]
-            path = Path(raw)
-            if not path.is_absolute():
-                path = PROJECT_ROOT / path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            url = f"sqlite+aiosqlite:///{path.as_posix()}"
-        kwargs = {"connect_args": {"check_same_thread": False}}
-    return create_async_engine(url, **kwargs)
+            if raw and raw != ":memory:":
+                path = Path(raw)
+                if not path.is_absolute():
+                    path = PROJECT_ROOT / path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                url = f"sqlite+aiosqlite:///{path.as_posix()}"
+        kwargs = {"connect_args": {"check_same_thread": False, "timeout": 15}}
+    eng = create_async_engine(url, **kwargs)
+    if is_sqlite:
+        configure_sqlite_engine(eng)
+    return eng
 
 
 settings = get_settings()

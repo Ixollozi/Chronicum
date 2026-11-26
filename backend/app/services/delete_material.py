@@ -9,19 +9,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.config import PROJECT_ROOT, get_settings
+from app.config import PROJECT_ROOT, resolve_storage_root
 from app.logging_setup import get_logger
 from app.models import Material
 
 log = get_logger(__name__)
 
+_ISOLATED_DOWNLOAD_BUCKETS = frozenset({"youtube", "instagram", "tiktok", "media"})
+
 
 def _storage_root() -> Path:
-    settings = get_settings()
-    root = Path(settings.storage_path)
-    if not root.is_absolute():
-        root = PROJECT_ROOT / root
-    return root.resolve()
+    return resolve_storage_root()
 
 
 def _safe_unlink(path: Path, *, root: Path) -> None:
@@ -56,15 +54,24 @@ def cleanup_material_files(material: Material) -> None:
         if not p.is_absolute():
             p = root / p
         _safe_unlink(p, root=root)
-        # Companion audio / preview dirs next to media
+        # Companion audio / preview / atlas dirs next to media
         stem = p.with_suffix("")
         for companion in (
             p.with_suffix(".mp3"),
             Path(str(stem) + "_preview.mp3"),
             Path(str(stem) + "_frames"),
             Path(str(stem) + "_preview_frames"),
+            Path(str(stem) + "_atlas"),
         ):
             _safe_unlink(companion, root=root)
+        # If stored inside an isolated per-download dir (<root>/<bucket>/<run_id>/file),
+        # remove the entire isolated dir (cleans companion carousel videos & slides).
+        try:
+            rel_parent = p.resolve().parent.relative_to(root)
+            if len(rel_parent.parts) == 2 and rel_parent.parts[0] in _ISOLATED_DOWNLOAD_BUCKETS:
+                _safe_unlink(p.resolve().parent, root=root)
+        except (OSError, ValueError):
+            pass
 
 
 async def delete_material(session: AsyncSession, material_id: str) -> bool:
@@ -83,6 +90,12 @@ async def delete_material(session: AsyncSession, material_id: str) -> bool:
         await session.delete(link)
     await session.delete(m)
     await session.commit()
+    try:
+        from app.services.graph import invalidate_graph_cache
+
+        invalidate_graph_cache()
+    except Exception:
+        pass
     log.info("material_deleted", material_id=material_id)
     return True
 

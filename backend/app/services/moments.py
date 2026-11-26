@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import _extract_json, with_llm_fallback
 from app.ai.vision import analyze_moment_frame
-from app.config import PROJECT_ROOT, get_settings
+from app.config import resolve_storage_root
 from app.logging_setup import get_logger
 from app.models import Material
 from app.services.media import (
@@ -101,21 +101,13 @@ def _has_existing_moment_images(material: Material, out_dir: Path) -> bool:
 
 
 def _moments_dir(material_id: str) -> Path:
-    settings = get_settings()
-    root = Path(settings.storage_path)
-    if not root.is_absolute():
-        root = PROJECT_ROOT / root
-    d = root / "materials" / material_id / "moments"
+    d = resolve_storage_root() / "materials" / material_id / "moments"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _atlas_dir(material_id: str) -> Path:
-    settings = get_settings()
-    root = Path(settings.storage_path)
-    if not root.is_absolute():
-        root = PROJECT_ROOT / root
-    return root / "materials" / material_id / "atlas"
+    return resolve_storage_root() / "materials" / material_id / "atlas"
 
 
 def parse_timed_segments(raw_text: str | None) -> list[dict]:
@@ -661,7 +653,13 @@ def build_ocr_picks(atlas: list[AtlasFrame], *, duration: float, max_moments: in
     return picks
 
 
-async def build_key_moments(session: AsyncSession, material: Material, video_path: str | None = None) -> Material:
+async def build_key_moments(
+    session: AsyncSession,
+    material: Material,
+    video_path: str | None = None,
+    *,
+    allow_download: bool = True,
+) -> Material:
     """Pick moments from OCR atlas (preferred) + speech; grab frames; local junk filter."""
     if material.source_type not in VIDEO_TYPES:
         raise ValueError("Moments only for video / youtube / instagram / tiktok")
@@ -672,8 +670,17 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
     vision_gate = bool(app_cfg.get("moments_vision_gate"))
 
     vpath = video_path if video_path and Path(video_path).exists() else None
-    if not vpath:
+    if not vpath and material.file_path and Path(material.file_path).exists():
+        vpath = material.file_path
+    if not vpath and allow_download:
         vpath = await resolve_video_path(material)
+    if not vpath and not allow_download:
+        log.info(
+            "moments_skipped_no_local_video",
+            material_id=material.id,
+            source=material.source_type,
+        )
+        return material
     if vpath and Path(vpath).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
         return material
     if vpath and (not material.file_path or not Path(material.file_path).exists()):
@@ -871,6 +878,7 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
                 t_hint = 0.0
 
             # Prefer exact atlas timestamp (no roaming offsets that land on neighbor slides)
+            copied_from_atlas = False
             if atlas_src and Path(str(atlas_src)).exists():
                 t = _accept_t(t_hint)
                 if t is None:
@@ -879,6 +887,7 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
                 fpath = str(staging_dir / fname)
                 try:
                     shutil.copyfile(str(atlas_src), fpath)
+                    copied_from_atlas = True
                 except Exception:
                     ok = await extract_frame_at(vpath, t, fpath)
                     if not ok:
@@ -916,16 +925,17 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
                     used_ts[-1] = chosen_t
                 t = chosen_t
 
-            # Refresh OCR from the actual frame file
-            try:
-                from app.services.screen_atlas import _ocr_image
-                import asyncio
+            # Refresh OCR only when frame was freshly extracted (atlas frames are already OCR'd)
+            if not (copied_from_atlas and str(pick.get("_ocr") or "").strip()):
+                try:
+                    from app.services.screen_atlas import _ocr_image
+                    import asyncio
 
-                fresh = await asyncio.to_thread(_ocr_image, fpath)
-                if fresh:
-                    ocr_text = fresh
-            except Exception:
-                pass
+                    fresh = await asyncio.to_thread(_ocr_image, fpath)
+                    if fresh:
+                        ocr_text = fresh
+                except Exception:
+                    pass
 
             # Prefer usable OCR; otherwise keep speech caption (do not drop good frames)
             from app.services.local_ocr import ocr_sanitize

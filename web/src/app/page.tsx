@@ -105,7 +105,7 @@ export default function HomePage() {
   useEffect(() => {
     let alive = true;
     client
-      .graph()
+      .graph({ light: true })
       .then((g) => {
         if (alive) setGraphNodes(g.nodes);
       })

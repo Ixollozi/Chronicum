@@ -45,12 +45,13 @@ from app.models import (
     MaterialTag,
     ProcessingStatus,
     SearchFeedback,
+    SourceType,
     Tag,
     TagStatus,
 )
 from app.search import answer_question
 from app.services.composer import run_composer
-from app.services.graph import build_graph
+from app.services.graph import build_graph, invalidate_graph_cache
 from app.services.processing import create_material
 from app.services.queue import enqueue_material
 from app.services.sources import UnsupportedSourceError, classify_url
@@ -316,49 +317,66 @@ async def create_url(body: UrlCreate, session: AsyncSession = Depends(get_sessio
     return EnqueueResponse(id=m.id, status=m.processing_status, message=f"{source_type} accepted")
 
 
+_VALID_SOURCE_TYPES = frozenset({e.value for e in SourceType})
+_AUDIO_SUFFIXES = frozenset(
+    {
+        ".ogg",
+        ".oga",
+        ".opus",
+        ".mp3",
+        ".wav",
+        ".m4a",
+        ".aac",
+        ".flac",
+        ".wma",
+        ".aiff",
+        ".aif",
+        ".caf",
+        ".amr",
+        ".mpga",
+        ".mpeg",
+        ".mp2",
+        ".weba",
+    }
+)
+_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
+_VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"})
+
+
+def _safe_disposition_name(name: str) -> str:
+    cleaned = "".join(ch for ch in (name or "file") if 32 <= ord(ch) < 127 and ch not in {'"', "\\", ";", "/"})
+    return cleaned[:180] or "file"
+
+
 @router.post("/materials/upload", response_model=EnqueueResponse)
 async def upload_file(
     session: AsyncSession = Depends(get_session),
     file: UploadFile = File(...),
     kind: str | None = Form(default=None),
 ):
-    name = (file.filename or "upload").lower()
-    raw = await file.read()
-    suffix = Path(name).suffix or ""
-    path = save_bytes(raw, suffix)
+    import asyncio
+    import hashlib
+    from uuid import uuid4
 
-    mime = file.content_type or ""
-    if kind:
-        source_type = kind
+    from app.config import get_settings
+    from app.services.storage import ensure_storage
+
+    name = (file.filename or "upload").lower()
+    suffix = Path(name).suffix.lower() if Path(name).suffix else ""
+    mime = (file.content_type or "").lower()
+
+    if kind is not None and kind.strip():
+        candidate_kind = kind.strip().lower()
+        if candidate_kind not in _VALID_SOURCE_TYPES:
+            raise HTTPException(400, f"Недопустимый тип материала: {candidate_kind}")
+        source_type = candidate_kind
     elif suffix == ".pdf" or "pdf" in mime:
         source_type = "pdf"
-    elif suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"} or mime.startswith("image/"):
+    elif suffix in _IMAGE_SUFFIXES or mime.startswith("image/"):
         source_type = "image"
-    elif (
-        suffix
-        in {
-            ".ogg",
-            ".oga",
-            ".opus",
-            ".mp3",
-            ".wav",
-            ".m4a",
-            ".aac",
-            ".flac",
-            ".wma",
-            ".aiff",
-            ".aif",
-            ".caf",
-            ".amr",
-            ".mpga",
-            ".mpeg",
-            ".mp2",
-            ".weba",
-        }
-        or mime.startswith("audio/")
-    ):
+    elif suffix in _AUDIO_SUFFIXES or mime.startswith("audio/"):
         source_type = "voice"
-    elif suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"} or mime.startswith("video/"):
+    elif suffix in _VIDEO_SUFFIXES or mime.startswith("video/"):
         source_type = "video"
     else:
         raise HTTPException(
@@ -367,13 +385,49 @@ async def upload_file(
             "Можно: PDF, изображение, видео, аудио (mp3/wav/m4a/ogg/flac/aac/opus…).",
         )
 
-    m = await create_material(
-        session,
-        source_type=source_type,
-        file_path=path,
-        content_hash=file_sha256(path),
-        title=Path(name).name,
-    )
+    settings = get_settings()
+    max_bytes = max(1, int(getattr(settings, "max_upload_mb", 200) or 200)) * 1024 * 1024
+    root = await asyncio.to_thread(ensure_storage)
+    dest = root / f"{uuid4().hex}{suffix}"
+    hasher = hashlib.sha256()
+    total_written = 0
+
+    def _write_chunk(fp, data: bytes) -> None:
+        fp.write(data)
+
+    fp = await asyncio.to_thread(open, dest, "wb")
+    try:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total_written += len(chunk)
+            if total_written > max_bytes:
+                raise HTTPException(
+                    413,
+                    f"Файл превышает максимальный размер ({settings.max_upload_mb} МБ).",
+                )
+            hasher.update(chunk)
+            await asyncio.to_thread(_write_chunk, fp, chunk)
+    except Exception:
+        await asyncio.to_thread(fp.close)
+        dest.unlink(missing_ok=True)
+        raise
+    else:
+        await asyncio.to_thread(fp.close)
+
+    try:
+        m = await create_material(
+            session,
+            source_type=source_type,
+            file_path=str(dest),
+            content_hash=hasher.hexdigest(),
+            title=Path(name).name,
+        )
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+
     if not (m.summary and m.processing_status == ProcessingStatus.DONE.value):
         await _enqueue(m.id)
     return EnqueueResponse(id=m.id, status=m.processing_status, message=f"{source_type} uploaded")
@@ -480,9 +534,26 @@ async def composer(body: ComposerRequest, session: AsyncSession = Depends(get_se
 
 
 @router.get("/graph", response_model=GraphResponse)
-async def graph(session: AsyncSession = Depends(get_session)):
-    data = await build_graph(session)
+async def graph(
+    session: AsyncSession = Depends(get_session),
+    light: bool = Query(default=False),
+):
+    data = await build_graph(session, include_semantic=not light)
     return GraphResponse(**data)
+
+
+@router.post("/embeddings/reindex")
+async def reindex_material_embeddings(
+    force: bool = Query(default=False),
+    limit: int | None = Query(default=None, ge=1, le=5000),
+    session: AsyncSession = Depends(get_session),
+):
+    from app.search.embeddings import reindex_embeddings
+
+    res = await reindex_embeddings(session, force=force, limit=limit)
+    if res.get("updated"):
+        invalidate_graph_cache()
+    return res
 
 
 @router.get("/categories", response_model=list[CategoryOut])
@@ -532,6 +603,7 @@ async def approve_tag(tag_id: int, session: AsyncSession = Depends(get_session))
     for link in links:
         link.proposed = False
     await session.commit()
+    invalidate_graph_cache()
     await session.refresh(t)
     return TagOut(id=t.id, name=t.name, status=t.status)
 
@@ -548,6 +620,7 @@ async def reject_tag(tag_id: int, session: AsyncSession = Depends(get_session)):
     for link in links:
         await session.delete(link)
     await session.commit()
+    invalidate_graph_cache()
     await session.refresh(t)
     return TagOut(id=t.id, name=t.name, status=t.status)
 
@@ -580,21 +653,24 @@ async def get_settings_api(session: AsyncSession = Depends(get_session)):
 
 @router.get("/settings/cookies", response_model=CookiesStatusOut)
 async def get_cookies_status():
+    import asyncio
     from dataclasses import asdict
 
     from app.services.cookies import inspect_cookies_file
 
-    return CookiesStatusOut(**asdict(inspect_cookies_file()))
+    info = await asyncio.to_thread(inspect_cookies_file)
+    return CookiesStatusOut(**asdict(info))
 
 
 @router.post("/settings/cookies", response_model=CookiesStatusOut)
 async def upload_cookies_content(body: CookiesUpdate):
+    import asyncio
     from dataclasses import asdict
 
     from app.services.cookies import save_cookies_content
 
     try:
-        info = save_cookies_content(body.content)
+        info = await asyncio.to_thread(save_cookies_content, body.content)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return CookiesStatusOut(**asdict(info))
@@ -602,11 +678,13 @@ async def upload_cookies_content(body: CookiesUpdate):
 
 @router.delete("/settings/cookies", response_model=CookiesStatusOut)
 async def clear_cookies_content():
+    import asyncio
     from dataclasses import asdict
 
     from app.services.cookies import delete_cookies_file
 
-    return CookiesStatusOut(**asdict(delete_cookies_file()))
+    info = await asyncio.to_thread(delete_cookies_file)
+    return CookiesStatusOut(**asdict(info))
 
 
 @router.patch("/settings", response_model=AppSettingsOut)
@@ -700,7 +778,10 @@ async def check_api_keys(provider: str = Query(...), session: AsyncSession = Dep
                 client = GroqLLMClient(settings, pk.api_key, key_id=pk.id)
             else:
                 client = GoogleLLMClient(settings, pk.api_key, key_id=pk.id)
-            await client.complete_text("Reply with OK", "ping")
+            try:
+                await client.complete_text("Reply with OK", "ping")
+            finally:
+                await client.aclose()
             await mark_key_result(session, pk.id, ok=True)
             ok += 1
             details.append({"id": pk.id, "ok": True, "hint": pk.api_key[-4:]})
@@ -777,27 +858,42 @@ async def material_moments(material_id: str, session: AsyncSession = Depends(get
 
 @router.get("/materials/{material_id}/moments/{filename}")
 async def serve_moment(material_id: str, filename: str):
+    import re
     from fastapi.responses import FileResponse
 
-    from app.config import PROJECT_ROOT, get_settings
+    from app.config import get_settings, resolve_storage_root
 
-    if ".." in filename or "/" in filename or "\\" in filename:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", material_id or ""):
+        raise HTTPException(400, "bad material_id")
+    if (
+        not filename
+        or Path(filename).name != filename
+        or ".." in filename
+        or "/" in filename
+        or "\\" in filename
+        or any(ord(c) < 32 for c in filename)
+    ):
         raise HTTPException(400, "bad filename")
+
     settings = get_settings()
-    root = Path(settings.storage_path)
-    if not root.is_absolute():
-        root = PROJECT_ROOT / root
-    path = root / "materials" / material_id / "moments" / filename
+    materials_root = (resolve_storage_root(settings) / "materials").resolve()
+    expected_dir = (materials_root / material_id / "moments").resolve()
+    if not expected_dir.is_relative_to(materials_root):
+        raise HTTPException(400, "bad material_id")
+    path = (expected_dir / filename).resolve()
+    if not path.is_relative_to(expected_dir):
+        raise HTTPException(400, "bad filename")
     if not path.exists() or not path.is_file():
         raise HTTPException(404, "Not found")
     suffix = path.suffix.lower()
     media = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png" if suffix == ".png" else "application/octet-stream"
+    safe_name = _safe_disposition_name(filename)
     return FileResponse(
         path,
         media_type=media,
         headers={
             "Cache-Control": "private, max-age=86400",
-            "Content-Disposition": f'inline; filename="{filename}"',
+            "Content-Disposition": f'inline; filename="{safe_name}"',
         },
     )
 
@@ -816,14 +912,15 @@ async def serve_audio(material_id: str, session: AsyncSession = Depends(get_sess
     path = resolve_material_audio(m)
     if not path:
         raise HTTPException(404, "No audio for this material")
+    safe_name = _safe_disposition_name(path.name)
     return FileResponse(
         path,
         media_type=audio_media_type(path),
-        filename=path.name,
+        filename=safe_name,
         headers={
             "Cache-Control": "private, max-age=3600",
             "Accept-Ranges": "bytes",
-            "Content-Disposition": f'inline; filename="{path.name}"',
+            "Content-Disposition": f'inline; filename="{safe_name}"',
         },
     )
 

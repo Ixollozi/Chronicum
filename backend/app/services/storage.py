@@ -5,11 +5,11 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from app.config import get_settings
+from app.config import resolve_storage_root
 
 
 def ensure_storage() -> Path:
-    root = Path(get_settings().storage_path)
+    root = resolve_storage_root()
     root.mkdir(parents=True, exist_ok=True)
     return root
 

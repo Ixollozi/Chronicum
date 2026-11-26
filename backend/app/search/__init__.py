@@ -206,39 +206,103 @@ async def _semantic_candidates(
 ) -> dict[str, tuple[Material, float]]:
     """
     Compute cosine similarity between the query embedding and recent DONE materials.
-    Returns `{material_id: (material, similarity)}` for candidates above a conservative floor.
+    Uses lightweight column projections (avoids hydrating 400 full ORM graphs) and
+    runs similarity math off the event loop via `asyncio.to_thread`. Handles provider
+    mismatches cleanly by scoring mismatched rows in local vector space as fallback.
     """
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.search.embeddings import local_embed_text, material_embedding_text
+
     settings = get_settings()
     if (getattr(settings, "embedding_provider", "auto") or "auto").strip().lower() == "off":
         return {}
-    q_emb = await compute_embedding(query, settings=settings)
+    q_emb = await compute_embedding(query, settings=settings, session=session)
     if not q_emb or not q_emb.get("vec"):
         return {}
     q_model = str(q_emb["model"])
     q_vec = q_emb["vec"]
-    min_sim = 0.24 if q_model == LOCAL_EMBED_MODEL else 0.42
+    q_local_vec = q_vec if q_model == LOCAL_EMBED_MODEL else local_embed_text(query)
+    min_sim_primary = 0.24 if q_model == LOCAL_EMBED_MODEL else 0.42
+    min_sim_local = 0.24
 
-    result = await session.execute(
-        select(Material)
-        .options(
-            selectinload(Material.category),
-            selectinload(Material.tags).selectinload(MaterialTag.tag),
+    rows = (
+        await session.execute(
+            select(
+                Material.id,
+                Material.title,
+                Material.summary,
+                Material.main_idea,
+                Material.tools,
+                Material.technologies,
+                Material.key_ideas,
+                Material.practical_takeaways,
+                Material.embedding,
+            )
+            .where(Material.processing_status == ProcessingStatus.DONE.value)
+            .order_by(Material.created_at.desc())
+            .limit(scan_limit)
         )
-        .where(Material.processing_status == ProcessingStatus.DONE.value)
-        .order_by(Material.created_at.desc())
-        .limit(scan_limit)
-    )
-    materials = list(result.scalars().unique().all())
-    scored: list[tuple[Material, float]] = []
-    for m in materials:
-        m_vec = material_vector_for_model(m, q_model)
-        if not m_vec:
-            continue
-        sim = cosine_similarity(q_vec, m_vec)
-        if sim >= min_sim:
-            scored.append((m, sim))
-    scored.sort(key=lambda pair: pair[1], reverse=True)
-    return {m.id: (m, sim) for m, sim in scored[:limit]}
+    ).all()
+    if not rows:
+        return {}
+
+    def _score_rows() -> list[tuple[str, float]]:
+        out: list[tuple[str, float]] = []
+        for row in rows:
+            mid, title, summary, main_idea, tools, technologies, key_ideas, takeaways, emb = row
+            sim = 0.0
+            if isinstance(emb, dict) and emb.get("model") == q_model and isinstance(emb.get("vec"), list) and emb["vec"]:
+                sim = cosine_similarity(q_vec, emb["vec"])
+                if sim >= min_sim_primary:
+                    out.append((mid, sim))
+                continue
+
+            # Provider mismatch or missing stored embedding: fall back cleanly to local space
+            if not q_local_vec:
+                continue
+            if isinstance(emb, dict) and emb.get("model") == LOCAL_EMBED_MODEL and isinstance(emb.get("vec"), list) and emb["vec"]:
+                local_vec = emb["vec"]
+            else:
+                stub = SimpleNamespace(
+                    title=title,
+                    summary=summary,
+                    main_idea=main_idea,
+                    tools=tools,
+                    technologies=technologies,
+                    key_ideas=key_ideas,
+                    practical_takeaways=takeaways,
+                    raw_text=None,
+                    category=None,
+                    tags=[],
+                )
+                txt = material_embedding_text(stub)
+                local_vec = local_embed_text(txt) if txt else []
+            if local_vec:
+                sim = cosine_similarity(q_local_vec, local_vec)
+                if sim >= min_sim_local:
+                    out.append((mid, sim))
+        out.sort(key=lambda pair: pair[1], reverse=True)
+        return out[:limit]
+
+    top_pairs = await asyncio.to_thread(_score_rows)
+    if not top_pairs:
+        return {}
+
+    top_ids = [mid for mid, _ in top_pairs]
+    mat_rows = (
+        await session.execute(
+            select(Material)
+            .options(
+                selectinload(Material.category),
+                selectinload(Material.tags).selectinload(MaterialTag.tag),
+            )
+            .where(Material.id.in_(top_ids))
+        )
+    ).scalars().unique().all()
+    by_id = {m.id: m for m in mat_rows}
+    return {mid: (by_id[mid], sim) for mid, sim in top_pairs if mid in by_id}
 
 
 async def _merge_hybrid_hits(

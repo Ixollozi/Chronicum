@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  clearToken,
   client,
   getToken,
   type ApiKeyItem,
@@ -379,6 +380,13 @@ export default function SettingsPage() {
             <span>Chronicum</span>
             <span className="settings-folio-dot" aria-hidden="true" />
             <span>Параметры</span>
+            <button
+              type="button"
+              onClick={() => clearToken("logout")}
+              className="ml-auto text-xs text-[var(--muted)] underline-offset-4 transition hover:text-[var(--ink)] hover:underline"
+            >
+              Выйти / сменить токен
+            </button>
           </div>
           <h1
             className="settings-title settings-title--in-hero"

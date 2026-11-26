@@ -190,6 +190,12 @@ export type CookiesStatus = {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const TOKEN_KEY = "chronicum_token";
+export const AUTH_CHANGED_EVENT = "chronicum:auth-changed";
+
+function notifyAuthChanged(reason?: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(AUTH_CHANGED_EVENT, { detail: { reason } }));
+}
 
 export function getToken(): string {
   if (typeof window === "undefined") return "";
@@ -197,7 +203,40 @@ export function getToken(): string {
 }
 
 export function setToken(token: string) {
+  if (typeof window === "undefined") return;
   localStorage.setItem(TOKEN_KEY, token);
+  notifyAuthChanged("login");
+}
+
+export function clearToken(reason = "logout") {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(TOKEN_KEY);
+  notifyAuthChanged(reason);
+}
+
+export async function verifyToken(candidate: string): Promise<void> {
+  const tok = candidate.trim();
+  if (!tok) {
+    throw new Error("Укажите WEB_API_TOKEN");
+  }
+  const res = await fetch(`${API_URL}/api/settings`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${tok}` },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const data = await res.json();
+      if (typeof data?.detail === "string") detail = data.detail;
+    } catch {
+      detail = await res.text();
+    }
+    if (res.status === 401) {
+      throw new Error("Неверный WEB_API_TOKEN");
+    }
+    throw new Error(detail || `Ошибка проверки токена (${res.status})`);
+  }
 }
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -209,6 +248,9 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   const res = await fetch(`${API_URL}${path}`, { ...init, headers, cache: "no-store" });
   if (!res.ok) {
+    if (res.status === 401) {
+      clearToken("unauthorized");
+    }
     let detail = res.statusText;
     try {
       const data = await res.json();
@@ -264,7 +306,8 @@ export const client = {
       method: "POST",
       body: JSON.stringify({ text, mode }),
     }),
-  graph: () => api<GraphPayload>("/api/graph"),
+  graph: (opts?: { light?: boolean }) =>
+    api<GraphPayload>(opts?.light ? "/api/graph?light=true" : "/api/graph"),
   createNote: (text: string) =>
     api<{ id: string; status: string; message: string }>("/api/materials/note", {
       method: "POST",
@@ -347,5 +390,4 @@ export const client = {
   evaluate: (id: string) => api<MaterialDetail>(`/api/materials/${id}/evaluate`, { method: "POST" }),
   opinion: (id: string) => api<MaterialDetail>(`/api/materials/${id}/opinion`, { method: "POST" }),
   moments: (id: string) => api<MaterialDetail>(`/api/materials/${id}/moments`, { method: "POST" }),
-  momentUrl: (id: string, filename: string) => `${API_URL}/api/materials/${id}/moments/${filename}`,
 };

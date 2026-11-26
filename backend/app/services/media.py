@@ -229,7 +229,7 @@ async def extract_frame_at(video_path: str, t_sec: float, out_path: str) -> bool
             [ff, "-y", "-i", video_path, "-ss", str(t), "-frames:v", "1", "-q:v", "2", out_path],
         ):
             result = await run_cmd(args, timeout=180)
-            if result.returncode == 0 and _file_ok(out_path):
+            if result.returncode == 0 and await asyncio.to_thread(_file_ok, out_path):
                 return True
             try:
                 Path(out_path).unlink(missing_ok=True)

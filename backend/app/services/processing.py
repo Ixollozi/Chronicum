@@ -133,6 +133,7 @@ async def _apply_card(session: AsyncSession, material: Material, card, cat_map, 
     await session.flush()
 
     seen_tag_ids: set[int] = set()
+    applied_tag_names: list[str] = []
     for tag_name in card.tags or []:
         tag = await resolve_tag(
             session,
@@ -144,6 +145,7 @@ async def _apply_card(session: AsyncSession, material: Material, card, cat_map, 
         if not tag or tag.id in seen_tag_ids:
             continue
         seen_tag_ids.add(tag.id)
+        applied_tag_names.append(tag.name)
         session.add(
             MaterialTag(
                 material_id=material.id,
@@ -151,6 +153,7 @@ async def _apply_card(session: AsyncSession, material: Material, card, cat_map, 
                 proposed=(tag.status == TagStatus.PENDING.value),
             )
         )
+    return (cat.name if cat else None), applied_tag_names
 
 
 async def _refresh_search_vector(session: AsyncSession, material_id: str) -> None:
@@ -199,7 +202,10 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
     settings = get_settings()
     result = await session.execute(
         select(Material)
-        .options(selectinload(Material.tags).selectinload(MaterialTag.tag))
+        .options(
+            selectinload(Material.category),
+            selectinload(Material.tags).selectinload(MaterialTag.tag),
+        )
         .where(Material.id == material_id)
     )
     material = result.scalars().first()
@@ -223,9 +229,9 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
             video_full=bool(app_cfg.get("video_full", True)),
         )
 
-        storage = Path(settings.storage_path)
-        if not storage.is_absolute():
-            storage = PROJECT_ROOT / storage
+        from app.config import resolve_storage_root
+
+        storage = resolve_storage_root(settings)
         atlas_dir = str(storage / "materials" / material_id / "atlas")
 
         raw_text, title, dur, audio_sec, media_path = await extract_text_for_material(
@@ -285,12 +291,16 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
         )
         material.usage_meta = meta
 
-        await _apply_card(session, material, llm.card, cat_map, tag_map)
+        cat_name, applied_tag_names = await _apply_card(session, material, llm.card, cat_map, tag_map)
         try:
             from app.search.embeddings import compute_embedding, material_embedding_text
 
-            emb_text = material_embedding_text(material)
-            emb = await compute_embedding(emb_text, settings=settings)
+            emb_text = material_embedding_text(
+                material,
+                category_name=cat_name,
+                tag_names=applied_tag_names,
+            )
+            emb = await compute_embedding(emb_text, settings=settings, session=session)
             if emb is not None:
                 material.embedding = emb
         except Exception as exc:
@@ -326,7 +336,15 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
                 ):
                     from app.services.moments import build_key_moments
 
-                    await build_key_moments(session, material, video_path=material.file_path)
+                    # Do not silently re-download full YouTube video when captions fast-path skipped downloading it
+                    has_local_media = bool(material.file_path and Path(material.file_path).exists())
+                    allow_dl = has_local_media or material.source_type != "youtube"
+                    await build_key_moments(
+                        session,
+                        material,
+                        video_path=material.file_path,
+                        allow_download=allow_dl,
+                    )
             except Exception as e:
                 log.warning("post_enrich_failed", material_id=material_id, error=str(e)[:300])
             material.processing_status = ProcessingStatus.DONE.value
@@ -334,6 +352,12 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
         await _refresh_search_vector(session, material.id)
         await session.commit()
         await session.refresh(material)
+        try:
+            from app.services.graph import invalidate_graph_cache
+
+            invalidate_graph_cache()
+        except Exception:
+            pass
         log.info(
             "material_processed",
             material_id=material.id,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hmac
+
 from fastapi import Header, HTTPException, Query, status
 
 from app.config import get_settings
@@ -36,5 +38,5 @@ async def require_web_token(
         provided = token.strip()
     if not provided:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Bearer token")
-    if provided != expected:
+    if not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")

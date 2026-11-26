@@ -1,4 +1,4 @@
-const CACHE_NAME = "chronicum-shell-v1";
+const CACHE_NAME = "chronicum-shell-v2";
 const PRECACHE_URLS = ["/", "/archive", "/graph", "/settings", "/site.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -26,9 +26,16 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/health")) return;
+  if (
+    url.pathname.startsWith("/api/") ||
+    url.pathname.startsWith("/health") ||
+    url.pathname === "/mcp" ||
+    url.pathname.startsWith("/mcp/")
+  ) {
+    return;
+  }
 
-  // Network-first with cache fallback for offline resilience
+  // Network-first with cache fallback; HTML "/" fallback ONLY for document navigations
   event.respondWith(
     fetch(req)
       .then((res) => {
@@ -38,6 +45,14 @@ self.addEventListener("fetch", (event) => {
         }
         return res;
       })
-      .catch(() => caches.match(req).then((cached) => cached || caches.match("/")))
+      .catch(() =>
+        caches.match(req).then((cached) => {
+          if (cached) return cached;
+          if (req.mode === "navigate") {
+            return caches.match("/");
+          }
+          return Response.error();
+        })
+      )
   );
 });
