@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+import html
+import json
 from pathlib import Path
+import re
 
 from app.config import get_settings
 from app.logging_setup import get_logger
@@ -10,6 +14,292 @@ from app.services.media import extract_audio, probe_duration_seconds
 from app.services.storage import ensure_storage
 
 log = get_logger(__name__)
+
+_SUBTITLE_NOISE_RE = re.compile(
+    r"^\s*(?:[\[\(]\s*(?:music|applause|laughter|cheering|silence|sound|музыка|аплодисменты|смех)\s*[\]\)]|[♪♫\s]+)\s*$",
+    re.IGNORECASE,
+)
+_VTT_TIME_RE = re.compile(
+    r"(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})\s*-->\s*(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})"
+)
+_TAG_RE = re.compile(r"<[^>]+>")
+_CAPTION_FORMAT_PRIORITY = ("json3", "vtt", "srt", "srv3", "ttml")
+
+
+@dataclass
+class YouTubeCaptions:
+    title: str
+    duration: float
+    language: str
+    is_auto: bool
+    segments: list[tuple[float, str]]
+    description: str = ""
+
+    def format_text(self, max_seconds: float | None = None) -> str:
+        lines: list[str] = []
+        for start_sec, text in self.segments:
+            if max_seconds is not None and start_sec > max_seconds:
+                break
+            sec_i = max(0, int(start_sec))
+            hours, rem = divmod(sec_i, 3600)
+            mins, secs = divmod(rem, 60)
+            ts = f"{hours}:{mins:02d}:{secs:02d}" if hours else f"{mins}:{secs:02d}"
+            lines.append(f"[{ts}] {text}")
+        return "\n".join(lines)
+
+
+def _clean_caption_text(raw: str) -> str:
+    txt = html.unescape(_TAG_RE.sub("", raw or ""))
+    txt = txt.replace("\u200b", "").replace("\ufeff", "")
+    txt = re.sub(r"\s+", " ", txt).strip()
+    if not txt or _SUBTITLE_NOISE_RE.match(txt):
+        return ""
+    return txt
+
+
+def _dedup_rolling_segments(segments: list[tuple[float, str]]) -> list[tuple[float, str]]:
+    """Collapse rolling / overlapping caption cues typical of YouTube auto-captions."""
+    out: list[tuple[float, str]] = []
+    prev_norm = ""
+    for start_sec, text in segments:
+        cleaned = _clean_caption_text(text)
+        if not cleaned:
+            continue
+        norm = cleaned.lower()
+        if norm == prev_norm:
+            continue
+        if prev_norm and norm.startswith(prev_norm) and len(norm) > len(prev_norm):
+            boundary = norm[len(prev_norm)]
+            if boundary in " \t.,!?;:-—":
+                delta = cleaned[len(prev_norm) :].strip(" \t-—,:;")
+                if not delta:
+                    continue
+                cleaned = delta
+                norm = cleaned.lower()
+        elif prev_norm and prev_norm.endswith(f" {norm}"):
+            continue
+        out.append((start_sec, cleaned))
+        prev_norm = norm
+    return out
+
+
+def _parse_json3_captions(payload: str) -> list[tuple[float, str]]:
+    data = json.loads(payload)
+    raw_segments: list[tuple[float, str]] = []
+    for ev in data.get("events") or []:
+        segs = ev.get("segs")
+        if not segs:
+            continue
+        piece = "".join(str(s.get("utf8") or "") for s in segs).replace("\n", " ")
+        cleaned = _clean_caption_text(piece)
+        if not cleaned:
+            continue
+        start_ms = float(ev.get("tStartMs") or 0)
+        raw_segments.append((start_ms / 1000.0, cleaned))
+    return _dedup_rolling_segments(raw_segments)
+
+
+def _parse_vtt_or_srt_captions(payload: str) -> list[tuple[float, str]]:
+    raw_segments: list[tuple[float, str]] = []
+    lines = payload.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    i = 0
+    n = len(lines)
+    while i < n:
+        m = _VTT_TIME_RE.search(lines[i])
+        if not m:
+            i += 1
+            continue
+        h = int(m.group(1) or 0)
+        mins = int(m.group(2))
+        secs = int(m.group(3))
+        ms_raw = m.group(4).ljust(3, "0")[:3]
+        start_sec = h * 3600 + mins * 60 + secs + int(ms_raw) / 1000.0
+        i += 1
+        cue_lines: list[str] = []
+        while i < n and lines[i].strip() != "":
+            line = lines[i].strip()
+            if _VTT_TIME_RE.search(line):
+                break
+            cleaned_line = _clean_caption_text(line)
+            if cleaned_line and (not cue_lines or cue_lines[-1].lower() != cleaned_line.lower()):
+                cue_lines.append(cleaned_line)
+            i += 1
+        if cue_lines:
+            raw_segments.append((start_sec, " ".join(cue_lines)))
+    return _dedup_rolling_segments(raw_segments)
+
+
+def parse_subtitle_payload(payload: str, fmt: str = "vtt") -> list[tuple[float, str]]:
+    """Parse YouTube json3 / WebVTT / SRT subtitle payload into (start_sec, text) tuples."""
+    if not payload or not payload.strip():
+        return []
+    fmt_l = (fmt or "").strip().lower()
+    if fmt_l == "json3" or payload.lstrip().startswith("{"):
+        try:
+            return _parse_json3_captions(payload)
+        except Exception:
+            if fmt_l == "json3":
+                return []
+    return _parse_vtt_or_srt_captions(payload)
+
+
+def _match_track_key(tracks: dict, lang: str) -> str | None:
+    if not tracks or not lang:
+        return None
+    lang_l = lang.lower()
+    if lang in tracks:
+        return lang
+    for key in tracks:
+        kl = key.lower()
+        if kl == lang_l:
+            return key
+    for key in tracks:
+        kl = key.lower()
+        if kl.startswith(f"{lang_l}-") or kl.startswith(f"{lang_l}_"):
+            return key
+    return None
+
+
+def _pick_track_format(entries: list[dict]) -> dict | None:
+    if not entries:
+        return None
+    by_ext: dict[str, dict] = {}
+    for item in entries:
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        ext = str(item.get("ext") or "").lower()
+        by_ext.setdefault(ext, item)
+    for ext in _CAPTION_FORMAT_PRIORITY:
+        if ext in by_ext:
+            return by_ext[ext]
+    return next(iter(by_ext.values()), None)
+
+
+def _candidate_caption_tracks(
+    info: dict, languages: tuple[str, ...] = ("ru", "en")
+) -> list[tuple[str, bool, dict]]:
+    """
+    Order candidate subtitle tracks: manual subtitles first, then automatic captions.
+    Prefers requested languages (default: ru, en) and video's declared language.
+    """
+    orig_lang = str(info.get("language") or "").split("-")[0].strip().lower()
+    lang_order: list[str] = []
+    for lang in (*languages, orig_lang):
+        if lang and lang.lower() not in lang_order:
+            lang_order.append(lang.lower())
+
+    manual = info.get("subtitles") or {}
+    auto = info.get("automatic_captions") or {}
+    candidates: list[tuple[str, bool, dict]] = []
+    seen_urls: set[str] = set()
+
+    for is_auto, bucket in ((False, manual), (True, auto)):
+        if not isinstance(bucket, dict):
+            continue
+        for lang in lang_order:
+            key = _match_track_key(bucket, lang)
+            if not key:
+                continue
+            picked = _pick_track_format(bucket.get(key) or [])
+            if not picked or picked["url"] in seen_urls:
+                continue
+            seen_urls.add(picked["url"])
+            candidates.append((key.split("-")[0].lower(), is_auto, picked))
+    return candidates
+
+
+def _fetch_youtube_captions_sync(
+    url: str,
+    *,
+    cookies: str = "",
+    cookies_from_browser: str = "",
+    languages: tuple[str, ...] = ("ru", "en"),
+    min_chars: int = 80,
+) -> YouTubeCaptions | None:
+    import httpx
+
+    opts: dict = {
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 20,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        },
+    }
+    if cookies and Path(cookies).exists():
+        opts["cookiefile"] = cookies
+    elif cookies_from_browser:
+        opts["cookiesfrombrowser"] = (cookies_from_browser,)
+
+    try:
+        _path, info = _ytdlp_run(url, opts, download=False)
+    except Exception as exc:
+        log.warning("youtube_captions_probe_failed", url=url[:120], error=str(exc)[:200])
+        return None
+    if not info or info.get("_type") == "playlist":
+        return None
+
+    candidates = _candidate_caption_tracks(info, languages=languages)
+    if not candidates:
+        return None
+
+    title = info.get("title") or info.get("fulltitle") or "YouTube"
+    duration = float(info.get("duration") or 0)
+    description = (info.get("description") or "")[:2000]
+    headers = {"User-Agent": opts["http_headers"]["User-Agent"]}
+
+    with httpx.Client(follow_redirects=True, timeout=20.0, headers=headers) as client:
+        for lang, is_auto, track in candidates:
+            try:
+                resp = client.get(track["url"])
+                resp.raise_for_status()
+            except Exception as exc:
+                log.warning(
+                    "youtube_caption_download_failed",
+                    lang=lang,
+                    auto=is_auto,
+                    error=str(exc)[:180],
+                )
+                continue
+            segments = parse_subtitle_payload(resp.text, fmt=str(track.get("ext") or "vtt"))
+            text_len = sum(len(t) for _, t in segments)
+            if text_len >= min_chars:
+                return YouTubeCaptions(
+                    title=title,
+                    duration=duration,
+                    language=lang,
+                    is_auto=is_auto,
+                    segments=segments,
+                    description=description,
+                )
+    return None
+
+
+async def fetch_youtube_captions(
+    url: str,
+    *,
+    languages: tuple[str, ...] = ("ru", "en"),
+    min_chars: int = 80,
+) -> YouTubeCaptions | None:
+    """
+    Fetch YouTube subtitles / auto-captions without downloading media.
+    Returns None when no usable track is available so callers can fall back to Whisper.
+    """
+    settings = get_settings()
+    cookies = getattr(settings, "media_cookies_file", "") or ""
+    cookies_browser = getattr(settings, "media_cookies_from_browser", "") or ""
+    return await asyncio.to_thread(
+        _fetch_youtube_captions_sync,
+        url,
+        cookies=cookies,
+        cookies_from_browser=cookies_browser,
+        languages=languages,
+        min_chars=min_chars,
+    )
 
 
 def _ffmpeg_available() -> bool:
@@ -63,7 +353,8 @@ def _ytdlp_run(url: str, opts: dict, *, download: bool = True):
     def run(current: dict):
         with yt_dlp.YoutubeDL(current) as ydl:
             info = ydl.extract_info(url, download=download)
-            return ydl.prepare_filename(info) if info else "", info
+            filename = ydl.prepare_filename(info) if (info and download) else ""
+            return filename, info
 
     try:
         return run(opts)

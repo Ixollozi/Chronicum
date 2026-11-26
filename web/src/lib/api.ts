@@ -127,6 +127,14 @@ export type ApiKeyItem = {
   last_error: string | null;
 };
 
+export type TagStatusValue = "pending" | "approved" | "rejected";
+
+export type TagItem = {
+  id: number;
+  name: string;
+  status: TagStatusValue | string;
+};
+
 export type ComposerResult = {
   intent: "url" | "note" | "search" | "refuse" | "task" | "rule" | string;
   message: string;
@@ -252,6 +260,14 @@ export const client = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
+  listTags: (status?: TagStatusValue) => {
+    const q = status ? `?status=${encodeURIComponent(status)}` : "";
+    return api<TagItem[]>(`/api/tags${q}`);
+  },
+  approveTag: (id: number) =>
+    api<TagItem>(`/api/tags/${id}/approve`, { method: "POST" }),
+  rejectTag: (id: number) =>
+    api<TagItem>(`/api/tags/${id}/reject`, { method: "POST" }),
   getSettings: () => api<AppSettings>("/api/settings"),
   health: () =>
     api<{

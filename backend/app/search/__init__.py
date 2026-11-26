@@ -10,6 +10,12 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.logging_setup import get_logger
 from app.models import Category, Material, MaterialTag, ProcessingStatus, Tag
+from app.search.stemmer import (
+    normalize_text,
+    sql_like_variants,
+    stem_word,
+    tokenize_and_stem,
+)
 
 log = get_logger(__name__)
 
@@ -23,6 +29,8 @@ _STOP = {
     "были", "будет", "где", "когда", "почему", "зачем", "какой", "какая", "какие", "какое",
 }
 
+_QUERY_WORD_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]{2,}")
+
 
 @dataclass
 class SearchHit:
@@ -31,7 +39,8 @@ class SearchHit:
 
 
 def _tokens(query: str) -> list[str]:
-    parts = re.findall(r"[0-9A-Za-zА-Яа-яЁё]{3,}", query.lower())
+    norm = normalize_text(query)
+    parts = [p for p in _QUERY_WORD_RE.findall(norm) if len(p) >= 3]
     out: list[str] = []
     seen: set[str] = set()
     for p in parts:
@@ -39,37 +48,111 @@ def _tokens(query: str) -> list[str]:
             continue
         seen.add(p)
         out.append(p)
+    if not out:
+        # Fallback: keep meaningful >=3-char words even if in _STOP (e.g. "как найти")
+        for p in parts:
+            if p not in seen and len(p) >= 4:
+                seen.add(p)
+                out.append(p)
+    if not out:
+        for p in _QUERY_WORD_RE.findall(norm):
+            if p not in _STOP and p not in seen:
+                seen.add(p)
+                out.append(p)
     return out[:12]
+
+
+def _score_material(m: Material, query_pairs: list[tuple[str, str]]) -> float:
+    title_norm = normalize_text(m.title or "")
+    summary_norm = normalize_text(f"{m.summary or ''} {m.main_idea or ''}")
+    tax_norm = normalize_text(
+        f"{m.category.name if m.category else ''} "
+        + " ".join(mt.tag.name for mt in (m.tags or []) if mt.tag)
+    )
+    body_norm = normalize_text((m.raw_text or "")[:6000])
+
+    title_stems = tokenize_and_stem(title_norm)
+    summary_stems = tokenize_and_stem(summary_norm)
+    tax_stems = tokenize_and_stem(tax_norm)
+    body_stems = tokenize_and_stem(body_norm)
+
+    score = 0.0
+    matched_terms = 0
+    for token, stemmed in query_pairs:
+        term_score = 0.0
+        # Stemmed or substring match per field with field weights
+        if stemmed in title_stems or token in title_norm:
+            term_score = max(term_score, 3.0)
+        if stemmed in tax_stems or token in tax_norm:
+            term_score = max(term_score, 2.5)
+        if stemmed in summary_stems or token in summary_norm:
+            term_score = max(term_score, 2.0)
+        if stemmed in body_stems or token in body_norm:
+            term_score = max(term_score, 1.0)
+        # Small exact-word bonus
+        if token in title_norm or token in tax_norm:
+            term_score += 0.35
+        if term_score > 0:
+            matched_terms += 1
+            score += term_score
+
+    if matched_terms <= 0:
+        return 0.0
+    # Coverage bonus when multiple distinct query terms match
+    if len(query_pairs) > 1:
+        score += (matched_terms / len(query_pairs)) * 1.5
+    score += (m.usefulness_score or 0) * 0.05
+    return score
 
 
 async def _sqlite_search(session: AsyncSession, query: str, limit: int) -> list[SearchHit]:
     tokens = _tokens(query)
-    # Always include full query as fallback token if short
     if not tokens:
-        stripped = query.strip()
+        stripped = normalize_text(query).strip()
         if len(stripped) >= 2:
-            tokens = [stripped.lower()]
+            tokens = [stripped]
         else:
             return []
 
-    # Load candidates that match any token in text fields, then score in Python
-    # (includes materials found via tag/category).
-    conds = []
+    query_pairs: list[tuple[str, str]] = []
+    seen_keys: set[tuple[str, str]] = set()
     for t in tokens:
-        like = f"%{t}%"
+        s = stem_word(t)
+        pair = (t, s or t)
+        if pair not in seen_keys:
+            seen_keys.add(pair)
+            query_pairs.append(pair)
+
+    like_patterns: list[str] = []
+    seen_pats: set[str] = set()
+    for token, stemmed in query_pairs:
+        for pat in sql_like_variants(stemmed) + sql_like_variants(token):
+            if pat not in seen_pats:
+                seen_pats.add(pat)
+                like_patterns.append(pat)
+
+    conds = []
+    for like in like_patterns:
         conds.append(Material.title.ilike(like))
         conds.append(Material.summary.ilike(like))
         conds.append(Material.main_idea.ilike(like))
         conds.append(Material.raw_text.ilike(like))
 
-    tag_ids = (
-        await session.execute(select(Tag.id).where(or_(*[Tag.name.ilike(f"%{t}%") for t in tokens])))
-    ).scalars().all()
-    cat_ids = (
-        await session.execute(
-            select(Category.id).where(or_(*[Category.name.ilike(f"%{t}%") for t in tokens]))
-        )
-    ).scalars().all()
+    if like_patterns:
+        tag_ids = (
+            await session.execute(
+                select(Tag.id).where(or_(*[Tag.name.ilike(like) for like in like_patterns]))
+            )
+        ).scalars().all()
+        cat_ids = (
+            await session.execute(
+                select(Category.id).where(
+                    or_(*[Category.name.ilike(like) for like in like_patterns])
+                )
+            )
+        ).scalars().all()
+    else:
+        tag_ids, cat_ids = [], []
 
     if tag_ids:
         mt_ids = (
@@ -82,37 +165,27 @@ async def _sqlite_search(session: AsyncSession, query: str, limit: int) -> list[
     if cat_ids:
         conds.append(Material.category_id.in_(list(cat_ids)))
 
-    result = await session.execute(
-        select(Material)
-        .options(
-            selectinload(Material.category),
-            selectinload(Material.tags).selectinload(MaterialTag.tag),
+    materials: list[Material] = []
+    if conds:
+        result = await session.execute(
+            select(Material)
+            .options(
+                selectinload(Material.category),
+                selectinload(Material.tags).selectinload(MaterialTag.tag),
+            )
+            .where(
+                Material.processing_status == ProcessingStatus.DONE.value,
+                or_(*conds),
+            )
+            .limit(120)
         )
-        .where(
-            Material.processing_status == ProcessingStatus.DONE.value,
-            or_(*conds),
-        )
-        .limit(80)
-    )
-    materials = list(result.scalars().unique().all())
+        materials = list(result.scalars().unique().all())
 
     scored: list[SearchHit] = []
     for m in materials:
-        blob = " ".join(
-            [
-                m.title or "",
-                m.summary or "",
-                m.main_idea or "",
-                (m.raw_text or "")[:4000],
-                m.category.name if m.category else "",
-                " ".join(mt.tag.name for mt in (m.tags or []) if mt.tag),
-            ]
-        ).lower()
-        hits = sum(1 for t in tokens if t in blob)
-        if hits <= 0:
-            continue
-        score = float(hits) + (m.usefulness_score or 0) * 0.05
-        scored.append(SearchHit(material=m, rank=score))
+        rank = _score_material(m, query_pairs)
+        if rank > 0:
+            scored.append(SearchHit(material=m, rank=rank))
 
     scored.sort(key=lambda h: h.rank, reverse=True)
     return scored[:limit]
@@ -126,16 +199,38 @@ async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[
     if get_settings().is_sqlite:
         return await _sqlite_search(session, q, limit)
 
+    # Postgres: combine Russian morphological FTS + simple FTS (for exact EN/brand tokens)
     sql = text(
         """
-        SELECT id, ts_rank(search_vector::tsvector, plainto_tsquery('simple', :q)) AS rank
-        FROM materials
-        WHERE processing_status = 'done'
-          AND search_vector IS NOT NULL
-          AND search_vector::tsvector @@ plainto_tsquery('simple', :q)
+        WITH q AS (
+          SELECT plainto_tsquery('russian', :q) || plainto_tsquery('simple', :q) AS tsq
+        )
+        SELECT m.id,
+               ts_rank(
+                 coalesce(
+                   m.search_vector::tsvector,
+                   setweight(to_tsvector('russian', coalesce(m.title, '')), 'A') ||
+                   setweight(to_tsvector('simple', coalesce(m.title, '')), 'A') ||
+                   setweight(to_tsvector('russian', coalesce(m.summary, '')), 'A') ||
+                   setweight(to_tsvector('russian', coalesce(m.main_idea, '')), 'B') ||
+                   setweight(to_tsvector('russian', coalesce(m.raw_text, '')), 'C')
+                 ),
+                 q.tsq
+               ) AS rank
+        FROM materials m, q
+        WHERE m.processing_status = 'done'
+          AND (
+            (m.search_vector IS NOT NULL AND m.search_vector::tsvector @@ q.tsq)
+            OR (
+              setweight(to_tsvector('russian', coalesce(m.title, '')), 'A') ||
+              setweight(to_tsvector('russian', coalesce(m.summary, '')), 'A') ||
+              setweight(to_tsvector('russian', coalesce(m.main_idea, '')), 'B') ||
+              setweight(to_tsvector('russian', coalesce(m.raw_text, '')), 'C')
+            ) @@ plainto_tsquery('russian', :q)
+          )
         ORDER BY
-          coalesce(usefulness_score, 0) DESC,
-          rank DESC
+          rank DESC,
+          coalesce(m.usefulness_score, 0) DESC
         LIMIT :limit
         """
     )
@@ -148,13 +243,26 @@ async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[
     if ids:
         result = await session.execute(
             select(Material)
-            .options(selectinload(Material.tags).selectinload(MaterialTag.tag))
+            .options(
+                selectinload(Material.category),
+                selectinload(Material.tags).selectinload(MaterialTag.tag),
+            )
             .where(Material.id.in_(ids))
         )
         materials = {m.id: m for m in result.scalars().all()}
         return [SearchHit(material=materials[i], rank=ranks[i]) for i in ids if i in materials]
 
     return await _sqlite_search(session, q, limit)
+
+
+def _format_sources_fallback(prefix: str, hits: list[SearchHit]) -> str:
+    lines = [prefix]
+    for i, hit in enumerate(hits, 1):
+        m = hit.material
+        lines.append(
+            f"[{i}] {m.title} — id={m.id}" + (f" — {m.source_url}" if m.source_url else "")
+        )
+    return "\n".join(lines)
 
 
 async def answer_question(session: AsyncSession, question: str) -> tuple[str, list[Material]]:
@@ -187,43 +295,29 @@ async def answer_question(session: AsyncSession, question: str) -> tuple[str, li
     user = f"Question: {question}\n\nExcerpts:\n" + "\n".join(sources_block)
 
     settings = get_settings()
-    if not settings.ai_ready:
-        lines = ["AI-ключ не задан. Найденные источники:"]
-        for i, hit in enumerate(hits, 1):
-            m = hit.material
-            lines.append(f"[{i}] {m.title} — id={m.id}")
-        return "\n".join(lines), [h.material for h in hits]
+    from app.ai import LLMClient, with_llm_fallback
+    from app.services.key_pool import any_provider_ready
 
-    from app.ai import GoogleLLMClient, GroqLLMClient
+    if not settings.ai_ready and not await any_provider_ready(session):
+        return _format_sources_fallback("AI-ключ не задан. Найденные источники:", hits), [
+            h.material for h in hits
+        ]
 
     try:
-        if settings.ai_provider == "google":
-            llm = GoogleLLMClient(settings)
-        else:
-            llm = GroqLLMClient(settings)
-        if isinstance(llm, GroqLLMClient):
-            resp = await llm.client.chat.completions.create(
-                model=llm.model,
-                temperature=0.2,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            )
-            answer = resp.choices[0].message.content or ""
-        else:
-            import asyncio
+        async def _ask(client: LLMClient) -> str:
+            return await client.complete_text(system, user)
 
-            prompt = f"{system}\n\n{user}"
-            resp = await asyncio.to_thread(llm.model.generate_content, prompt)
-            answer = getattr(resp, "text", None) or ""
+        answer = await with_llm_fallback(session, _ask)
     except Exception as e:
         log.exception("search_llm_failed", error=str(e))
-        lines = ["Нашёл материалы, но LLM недоступен. Источники:"]
-        for i, hit in enumerate(hits, 1):
-            m = hit.material
-            lines.append(f"[{i}] {m.title} — id={m.id}" + (f" — {m.source_url}" if m.source_url else ""))
-        return "\n".join(lines), [h.material for h in hits]
+        return _format_sources_fallback("Нашёл материалы, но LLM недоступен. Источники:", hits), [
+            h.material for h in hits
+        ]
+
+    if not (answer or "").strip():
+        return _format_sources_fallback("Нашёл материалы, но LLM вернул пустой ответ. Источники:", hits), [
+            h.material for h in hits
+        ]
 
     if "id=" not in answer.lower() and "источник" not in answer.lower() and "source" not in answer.lower():
         footer = ["", "Sources:"]
