@@ -11,7 +11,7 @@ import {
   cleanMetaPart,
   formatShortDate,
 } from "@/components/MaterialRow";
-import { client, type MaterialListItem } from "@/lib/api";
+import { client, isAuthError, type MaterialListItem } from "@/lib/api";
 
 const STATUSES = [
   { value: "", label: "Все" },
@@ -94,6 +94,7 @@ export default function ArchivePage() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [busyTotal, setBusyTotal] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
   const loadedCountRef = useRef(0);
   const PAGE_SIZE = 50;
@@ -101,6 +102,15 @@ export default function ArchivePage() {
   useEffect(() => {
     loadedCountRef.current = items.length;
   }, [items.length]);
+
+  useEffect(() => {
+    try {
+      const s = new URLSearchParams(window.location.search).get("status") || "";
+      if (s) setStatus(s);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const load = useCallback(
     async (opts?: { silent?: boolean; append?: boolean; offset?: number }) => {
@@ -146,6 +156,7 @@ export default function ArchivePage() {
           });
         }
       } catch (e) {
+        if (isAuthError(e)) return;
         setError(e instanceof Error ? e.message : "Ошибка загрузки");
       } finally {
         if (append) setLoadingMore(false);
@@ -155,7 +166,18 @@ export default function ArchivePage() {
     [q, status, category, tag, sourceType, entryKind, minScore, sort]
   );
 
+  const refreshBusy = useCallback(async () => {
+    try {
+      const b = await client.materialsBusy();
+      setBusyTotal(b.total);
+      return b.total;
+    } catch {
+      return 0;
+    }
+  }, []);
+
   useEffect(() => {
+    void refreshBusy();
     client
       .categories()
       .then((c) => setCategories(cleanCategories(c)))
@@ -164,7 +186,7 @@ export default function ArchivePage() {
       .listTags("approved")
       .then((t) => setTags(t))
       .catch(() => undefined);
-  }, []);
+  }, [refreshBusy]);
 
   useEffect(() => {
     load();
@@ -176,11 +198,21 @@ export default function ArchivePage() {
   }, [draftQ]);
 
   useEffect(() => {
-    const busyItems = items.some((i) => ["queued", "processing"].includes(i.processing_status));
-    if (!busyItems) return;
-    const t = setInterval(() => load({ silent: true }), 4000);
-    return () => clearInterval(t);
-  }, [items, load]);
+    let cancelled = false;
+    const tick = async () => {
+      const total = await refreshBusy();
+      if (cancelled) return;
+      if (total > 0) {
+        await load({ silent: true });
+      }
+    };
+    const intervalMs = busyTotal > 0 ? 2500 : 8000;
+    const t = setInterval(() => void tick(), intervalMs);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [busyTotal, load, refreshBusy]);
 
   const activeItem = useMemo(
     () => items.find((i) => i.id === activeId) ?? null,
@@ -192,10 +224,7 @@ export default function ArchivePage() {
     [items, selected]
   );
 
-  const processingCount = useMemo(
-    () => items.filter((i) => ["queued", "processing"].includes(i.processing_status)).length,
-    [items]
-  );
+  const processingCount = busyTotal;
 
   const filtersActive = Boolean(
     q || status || category || tag || sourceType || entryKind || minScore || sort !== "newest"

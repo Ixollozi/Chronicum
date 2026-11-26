@@ -13,8 +13,9 @@
 
 | Что | Статус | Детали |
 |---|---|---|
-| Автоскрейп Instagram Reels / TikTok по ссылке | **Сделано** | yt-dlp + fallback-парсеры каруселей + управление Netscape `cookies.txt` прямо в Веб → Настройки → Режимы → Cookies |
-| Простой веб-UI (список карточек, фильтры, просмотр) | **Сделано** | Кабинет Next.js (`web/`): расширенные фильтры архива (источник, тип, score, тег, сортировка), модерация pending-тегов, PWA (`site.webmanifest` + `/sw.js`) |
+| Автоскрейп Instagram Reels / TikTok по ссылке | **Сделано** | yt-dlp + fallback-парсеры каруселей + управление Netscape `cookies.txt` прямо в Веб → Настройки → Режимы → Cookies; класс A = upload + `source_url` |
+| Правда Reels-listicle (ASR/OCR/score/moments) | QA githubradar — **P0/P1 закрыты** | Grounding/evidence verification, talking-head / пустой ASR, moments auto-gate (`auto_moments=false`) — [QA](QA_INSTAGRAM_LISTICLE_FINDINGS.md), [SYSTEM_AUDIT §10](SYSTEM_AUDIT.md) |
+| Простой веб-UI (список карточек, фильтры, просмотр) | **Сделано** | Кабинет Next.js (`web/`): расширенные фильтры архива (источник, тип, score, тег, сортировка), клиенты (`/clients`), модерация pending-тегов, Google OAuth + PAT, PWA (`site.webmanifest` + `/sw.js`) |
 | Лёгкий embedding-поиск (hybrid semantic + FTS) | **Сделано** | Локальные эмбеддинги (`local-hash-v1`) + опциональный Gemini `text-embedding-004`, гибридное ранжирование в SQLite и Postgres |
 | «Доверительный режим» авто-подтверждения тегов | В бэклоге | ТЗ §3.6 — снизить трение после недели ручных approve |
 | Еженедельный авто-дедуп похожих тегов | Частично | Есть ручной/базовый merge дублей; авто-cron — позже |
@@ -43,11 +44,43 @@
 
 ---
 
-## 4. Фаза 4 — SaaS
+## 4. Фаза 4 — SaaS + мобильное приложение (связь по аккаунту)
 
-- Мультипользовательский режим, аутентификация, биллинг.
-- Официальные / юридически проверенные интеграции с источниками контента.
-- Публичный API.
+Цель: **один аккаунт → одна база знаний на web / мобиле / MCP / TG**, без «двух правд» (локальный SQLite vs облако).
+
+### Принцип (заложить заранее, даже пока Lite)
+
+| Слой | Решение |
+|---|---|
+| Identity | Аккаунт (email/OAuth/Apple/Google). Не «устройство = пользователь». |
+| Data ownership | Материалы принадлежат `user_id` (позже `workspace_id` для агентства). |
+| API | Уже почти есть (`/api/...` + Bearer). Мобилка = **тот же API**, не отдельный бэкенд. |
+| Sync | Server is source of truth. Клиенты pull/push через API; локальный кэш (SQLite/Room) = offline replica, не вторая база. |
+| Media | Файлы/моменты в object storage (S3) по `user_id/...`; CDN URL в карточке. Сейчас FS на VPS — абстракция storage уже намечена в ТЗ. |
+| Auth | Access + refresh tokens (или session cookie web + secure storage mobile). Один token scope для MCP/mobile/web. |
+| Lite → cloud | Экспорт/импорт или «upgrade»: миграция SQLite → Postgres с `user_id`; не ломать MCP mid-flight. |
+
+### Мобильное приложение — продуктово
+
+- **Не** форк логики карточек: только клиент (intake share sheet, список, карточка, поиск, опционально «слушать»).
+- Share → Chronicum (iOS Share / Android intent) = главный mobile intake (Reels/файлы).
+- Офлайн: читать кэш; очередь upload при сети.
+- Push: «карточка готова» / «ошибка IG».
+
+### Порядок внедрения (не раньше DoD personal MVP)
+
+1. **Auth + multi-tenant API** (даже для одного себя в cloud) — фундамент.  
+2. **Postgres + object storage** как cloud mode (Lite остаётся для solo offline).  
+3. **Mobile client** на публичный API.  
+4. Биллинг / workspaces — когда появится второй платящий пользователь.
+
+### Чего не делать сейчас
+
+- Отдельная «мобильная БД» или дублирующий sync-протокол в обход API.  
+- Agency OS / биллинг до auth+sync.  
+- Переписывать Next под React Native «всё в одном» — web остаётся кабинетом, mobile — тонкий клиент.
+
+Детали по текущему фокусу (до SaaS): [SYSTEM_AUDIT.md](SYSTEM_AUDIT.md) P1.5 / §10 кадры.
 
 ---
 
@@ -56,6 +89,8 @@
 Не блокируют MVP; брать по боли после личного использования.
 
 ### Продукт и UX
+- ~~**Живая переписка с клиентом**~~ — **P2 MVP** (`/clients`, MCP `get_client_context`, TG `/client*`). См. [SYSTEM_AUDIT.md](SYSTEM_AUDIT.md) §9. Не CRM/Agency OS.
+- **Карта архива** (`/graph`) — теги + рёбра по общим tools/links (не semantic KG).
 - Еженедельный digest в бота: что сохранил, топ по score, pending-теги.
 - Экспорт/импорт базы (JSON/Markdown) для смены VPS или бэкапа «вне Postgres».
 - Команды бота для быстрых фильтров (`/tag`, `/category`, `/top`).
@@ -64,8 +99,8 @@
 - [x] **Озвучка карточки (TTS):** кнопка «Слушать» на `/m/[id]` (Edge TTS с кэшем аудио).
 
 ### Контроль лимитов free tier
-- [ ] Алерты в бота при приближении к RPD/TPM/минутам Whisper (мягкий budget по usage, не $).
-- [x] Автоfallback: при серии `429` на Groq LLM → пул ключей и автоматический переход на Gemini (`GOOGLE_AI_API_KEY`).
+- [x] Мягкий дневной budget alert (`usage_alert` в `/health` и `/status`). Полные алерты по RPD/TPM/минутам Whisper — позже.
+- [x] Автоfallback: при серии `429` на Groq LLM → пул ключей с cooldown и автоматический переход на Gemini (`GOOGLE_AI_API_KEY`).
 - [ ] Дашборд usage за день/неделю в `/stats`.
 
 ### Качество контента

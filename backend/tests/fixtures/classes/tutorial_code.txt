@@ -1,0 +1,6 @@
+[0:00] Шаг 1 установи пакет командой pip install demo-lib. Шаг 2 создай файл main.py и добавь импорт.
+[0:25] Шаг 3 запусти python main.py и проверь вывод в консоли.
+
+[On-screen OCR timed]
+[OCR 0:10] pip install demo-lib
+[OCR 0:20] import demo_lib

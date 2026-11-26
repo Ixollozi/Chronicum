@@ -54,13 +54,40 @@ _MULTI_PART_TUTORIAL = re.compile(
     r"(?:animation|анимаци).{0,40}(?:two|three|второй|третий|kedua|ketiga)",
     re.I,
 )
-_CTA = re.compile(r"(пиши|лям|подпишись|subscribe|лайк|в описании|ссылка в|пиши слово)", re.I)
-_BRANDISH = re.compile(
-    r"\b(premiere|davinci|final\s*cut|capcut|envato|envatoelements|storyblocks|pexels|unsplash|"
-    r"chatgpt|figma|photoshop|canva|artlist|epidemic|dafont|motionarray|creativemarket|"
-    r"fonts\.google)\b",
+_CTA = re.compile(
+    r"(пиши|лям|подпишись|subscribe|лайк|в описании|ссылка в|пиши слово|"
+    r"тг\b|telegram|t\.me|наш\s+канал|github\s*radar|подписыва)",
     re.I,
 )
+_BRANDISH = re.compile(
+    r"\b(premiere|davinci|final\s*cut|capcut|envato|envatoelements|storyblocks|pexels|unsplash|"
+    r"chatgpt|claude|gemini|seedance|omniflash|omni\s*flash|google\s*flow|cloth|pencil|"
+    r"figma|photoshop|canva|artlist|epidemic|dafont|motionarray|creativemarket|"
+    r"fonts\.google|rybbit|boardui|witr|github|notion)\b",
+    re.I,
+)
+_GITHUB_SLUG = re.compile(r"\b([A-Za-z0-9][\w.-]{0,38})/([A-Za-z0-9._-]{1,100})\b")
+_PERCENT_HEAVY = re.compile(r"\d+\s*%")
+_LISTICLE_PROJECTS = re.compile(
+    r"(?:первый|второй|третий|четвёртый|четвертый|пятый)(?:\s+\w+){0,2}\s*[–—-]|"
+    r"\b(проект\w*|open[- ]?source|гитхаб|github)\b|"
+    r"\b(три|3)\s+проект|"
+    r"самые\s+полезные",
+    re.I,
+)
+_LISTICLE_ORDINAL = re.compile(
+    r"(?:^|\b)(перв(?:ый|ая|ое|ые)|втор(?:ой|ая|ое|ые)|трет(?:ий|ья|ье|ьи)|"
+    r"четвёрт(?:ый|ая|ое)|четверт(?:ый|ая|ое)|пят(?:ый|ая|ое))\b",
+    re.I,
+)
+_ORDINAL_TO_N = {
+    "перв": 1,
+    "втор": 2,
+    "трет": 3,
+    "четвёрт": 4,
+    "четверт": 4,
+    "пят": 5,
+}
 
 _JUNK_SPEECH = re.compile(
     r"("
@@ -173,7 +200,27 @@ def detect_listicle(raw_text: str | None, segments: list[dict], atlas: list[Atla
     step_segs = sum(1 for s in segments if _LISTICLE_SPEECH.search(s.get("text") or ""))
     if speech_hits >= 2 or ocr_hits >= 2 or step_segs >= 2:
         return True
-    return bool(_MULTI_PART_TUTORIAL.search(blob))
+    if _MULTI_PART_TUTORIAL.search(blob):
+        return True
+    # "N projects" voiceover without explicit «шаг»
+    projectish = len(_LISTICLE_PROJECTS.findall(blob))
+    ordinals = len(re.findall(r"\b(первый|второй|третий|четвёртый|четвертый|пятый)\b", blob, re.I))
+    slug_frames = sum(1 for fr in atlas if _GITHUB_SLUG.search(fr.text or ""))
+    if slug_frames >= 2 and (projectish >= 1 or ordinals >= 2):
+        return True
+    if projectish >= 2 and (slug_frames >= 1 or ordinals >= 2):
+        return True
+    if ordinals >= 3 and slug_frames >= 1:
+        return True
+    return False
+
+
+def _percent_density(text: str) -> float:
+    toks = re.findall(r"[A-Za-zА-Яа-яЁё0-9%]+", text or "")
+    if not toks:
+        return 0.0
+    pct = len(_PERCENT_HEAVY.findall(text or ""))
+    return pct / max(1, len(toks))
 
 
 def _spread_speech_picks(
@@ -225,6 +272,11 @@ def is_ocr_junk(text: str, *, t_sec: float = 0.0, duration: float = 0.0) -> bool
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
     if not cleaned:
         return True
+    # Keep GitHub project / brand screens even if OCR heuristically looks "garble"
+    if _GITHUB_SLUG.search(cleaned) or re.search(r"github\.com/", cleaned, re.I):
+        return False
+    if _BRANDISH.search(cleaned) and len(re.findall(r"[A-Za-zА-Яа-яЁё0-9]{2,}", cleaned)) >= 2:
+        return False
     if ocr_is_garble(cleaned) and not ocr_sanitize(cleaned):
         return True
     cleaned = ocr_sanitize(cleaned) or cleaned
@@ -274,11 +326,18 @@ def score_atlas_frame(fr: AtlasFrame, *, duration: float, listicle: bool) -> flo
         score += 6.0 if listicle else 3.0
     if _BRANDISH.search(text):
         score += 5.5
+    if _GITHUB_SLUG.search(text) or re.search(r"github\.com/", text, re.I):
+        score += 8.0 if listicle else 4.0
+    dens = _percent_density(text)
+    if dens >= 0.25 and not _GITHUB_SLUG.search(text) and not _BRANDISH.search(text):
+        score -= 8.0
+    elif dens >= 0.15 and not _GITHUB_SLUG.search(text):
+        score -= 4.0
     if re.search(r"для\s+\w+", text, re.I):
         score += 2.0
     # Prefer mid/content over CTA tail
-    if duration > 12 and fr.t_sec > duration * 0.9:
-        score -= 4.0
+    if duration > 12 and fr.t_sec > duration * 0.88:
+        score -= 5.0 if _CTA.search(text) or dens >= 0.2 else 3.5
     if duration > 12 and fr.t_sec < duration * 0.06:
         score -= 1.5
     return score
@@ -396,8 +455,9 @@ async def _ensure_timed_segments(material: Material, vpath: str) -> list[dict]:
         return parsed
 
     try:
-        from app.ai import get_transcribe_client
+        from app.ai import get_transcribe_client, get_transcribe_client_pooled
         from app.db import SessionLocal
+        from app.pipelines import _transcribe_social_audio
 
         audio = vpath
         if not str(audio).endswith(".mp3"):
@@ -412,58 +472,47 @@ async def _ensure_timed_segments(material: Material, vpath: str) -> list[dict]:
 
         try:
             client = get_transcribe_client()
-            tr = await client.transcribe(audio, language="auto")
         except RuntimeError:
-            from app.ai import get_transcribe_client_pooled
-
             async with SessionLocal() as session:
                 client = await get_transcribe_client_pooled(session)
-                tr = await client.transcribe(audio, language="auto")
 
-        if tr.segments:
-            from app.services.localize import localize_transcript_to_russian
-            from app.services.resources import normalize_asr_glitches
+        caption_hint = (material.title or "") + " " + (material.source_url or "")
+        tr, speech, weak = await _transcribe_social_audio(
+            client, audio, caption_hint=caption_hint, session=None
+        )
 
-            segs = []
+        if weak or not speech:
+            return parsed
+
+        segs = parse_timed_segments(speech) or []
+        if not segs and tr.segments:
+            from app.services.resources import normalize_asr_glitches, is_weak_speech
+
             for s in tr.segments:
-                if not (s.text or "").strip():
+                t = normalize_asr_glitches((s.text or "").strip())
+                if not t or is_weak_speech(t, min_chars=8):
                     continue
                 segs.append(
                     {
                         "start": float(s.start),
                         "end": float(s.end or (s.start + 2.0)),
-                        "text": normalize_asr_glitches(s.text.strip()),
+                        "text": t,
                     }
                 )
-            if tr.text:
-                old = material.raw_text or ""
-                ocr_idx = old.find("[On-screen")
-                suffix = old[ocr_idx:] if ocr_idx >= 0 else ""
-                timed = []
-                for seg in segs:
-                    m, sec = divmod(seg["start"], 60)
-                    frac = int(round((seg["start"] - int(seg["start"])) * 10))
-                    if frac:
-                        timed.append(f"[{int(m)}:{int(sec):02d}.{frac}] {seg['text']}")
-                    else:
-                        timed.append(f"[{int(m)}:{int(sec):02d}] {seg['text']}")
-                speech = "\n".join(timed)
-                speech = await localize_transcript_to_russian(
-                    speech, language=getattr(tr, "language", None)
-                )
-                localized_segs = parse_timed_segments(speech)
-                if localized_segs:
-                    segs = [
-                        {
-                            "start": float(s["start"]),
-                            "end": float(s.get("end") or (s["start"] + 2.0)),
-                            "text": s["text"],
-                        }
-                        for s in localized_segs
-                    ]
-                material.raw_text = (speech + ("\n\n" + suffix if suffix else "")).strip()
+        if segs:
+            old = material.raw_text or ""
+            ocr_idx = old.find("[On-screen")
+            suffix = old[ocr_idx:] if ocr_idx >= 0 else ""
+            material.raw_text = (speech + ("\n\n" + suffix if suffix else "")).strip()
             log.info("moments_retranscribed", material_id=material.id, segments=len(segs))
-            return segs
+            return [
+                {
+                    "start": float(s["start"]),
+                    "end": float(s.get("end") or (s["start"] + 2.0)),
+                    "text": s["text"],
+                }
+                for s in segs
+            ]
     except Exception as e:
         log.warning("moments_retranscribe_failed", error=str(e)[:300])
     return parsed
@@ -496,15 +545,30 @@ def _candidate_segments(segments: list[dict], duration: float, limit: int = 14) 
 
 def _step_num_from_text(text: str) -> int | None:
     m = _LISTICLE_OCR.search(text or "") or _LISTICLE_SPEECH.search(text or "")
-    if not m:
-        return None
-    for g in m.groups():
-        if g is not None:
-            try:
-                return int(g)
-            except ValueError:
-                continue
+    if m:
+        for g in m.groups():
+            if g is not None:
+                try:
+                    return int(g)
+                except ValueError:
+                    continue
+    om = _LISTICLE_ORDINAL.search(text or "")
+    if om:
+        stem = om.group(1).lower()
+        for prefix, n in _ORDINAL_TO_N.items():
+            if stem.startswith(prefix):
+                return n
     return None
+
+
+def _slug_key_from_text(text: str) -> str | None:
+    m = _GITHUB_SLUG.search(text or "")
+    if not m:
+        m = re.search(r"github\.com/([A-Za-z0-9][\w.-]{0,38})/([A-Za-z0-9._-]{1,100})", text or "", re.I)
+        if not m:
+            return None
+        return f"{m.group(1).lower()}/{m.group(2).lower()}"
+    return f"{m.group(1).lower()}/{m.group(2).lower()}"
 
 
 def build_listicle_picks(
@@ -514,7 +578,7 @@ def build_listicle_picks(
     duration: float,
     max_moments: int = 6,
 ) -> list[dict]:
-    """One moment per listicle step / OCR-rich resource frame."""
+    """One moment per listicle step / project slug / OCR-rich resource frame."""
     scored = [
         (score_atlas_frame(fr, duration=duration, listicle=True), fr)
         for fr in atlas
@@ -523,13 +587,19 @@ def build_listicle_picks(
     scored.sort(key=lambda x: x[0], reverse=True)
 
     by_step: dict[int, AtlasFrame] = {}
+    by_slug: dict[str, AtlasFrame] = {}
     resource_frames: list[AtlasFrame] = []
     for _sc, fr in scored:
         step = _step_num_from_text(fr.text)
         # Prefer richer on-screen lists over bare «#N» title cards
         brand_heavy = bool(_BRANDISH.search(fr.text or ""))
         url_heavy = bool(re.search(r"\.(com|io|app)\b", fr.text or "", re.I))
-        if brand_heavy or url_heavy:
+        slug = _slug_key_from_text(fr.text or "")
+        if slug:
+            prev_slug = by_slug.get(slug)
+            if prev_slug is None or (_sc > score_atlas_frame(prev_slug, duration=duration, listicle=True)):
+                by_slug[slug] = fr
+        if brand_heavy or url_heavy or slug:
             resource_frames.append(fr)
         if step is not None:
             prev = by_step.get(step)
@@ -538,7 +608,7 @@ def build_listicle_picks(
             else:
                 # Upgrade step frame if new one has more brand/URLs
                 prev_rich = bool(_BRANDISH.search(prev.text or ""))
-                new_rich = brand_heavy or url_heavy
+                new_rich = brand_heavy or url_heavy or bool(slug)
                 if (new_rich and not prev_rich) or (fr.score or 0) > (prev.score or 0) + 15:
                     by_step[step] = fr
 
@@ -550,16 +620,25 @@ def build_listicle_picks(
 
     picks: list[dict] = []
     used_ts: list[float] = []
+    used_slugs: set[str] = set()
 
     def _add(fr: AtlasFrame, quote: str, why: str, *, min_gap: float = 2.4) -> bool:
+        slug = _slug_key_from_text(fr.text or "")
+        if slug and slug in used_slugs:
+            return False
         # If close to an existing weaker pick, replace when this frame is richer
         for i, t in enumerate(list(used_ts)):
             if abs(fr.t_sec - t) < min_gap:
                 existing = picks[i]
                 old_rich = bool(_BRANDISH.search(existing.get("_ocr") or existing.get("caption") or ""))
-                new_rich = bool(_BRANDISH.search(fr.text or ""))
-                if new_rich and not old_rich:
+                old_slug = _slug_key_from_text(existing.get("_ocr") or "")
+                new_rich = bool(_BRANDISH.search(fr.text or "")) or bool(slug)
+                if (new_rich and not old_rich) or (slug and not old_slug):
+                    if old_slug:
+                        used_slugs.discard(old_slug)
                     used_ts[i] = fr.t_sec
+                    if slug:
+                        used_slugs.add(slug)
                     step = _step_num_from_text(fr.text) or _step_num_from_text(quote)
                     picks[i] = {
                         "t_sec": float(fr.t_sec),
@@ -575,6 +654,8 @@ def build_listicle_picks(
         if is_ocr_junk(fr.text, t_sec=fr.t_sec, duration=duration):
             return False
         used_ts.append(fr.t_sec)
+        if slug:
+            used_slugs.add(slug)
         step = _step_num_from_text(fr.text) or _step_num_from_text(quote)
         caption = _caption_from_ocr(fr.text)
         picks.append(
@@ -590,29 +671,58 @@ def build_listicle_picks(
         )
         return True
 
-    # 1) Resource/brand screens first (highest value for archive)
-    for fr in resource_frames:
-        _add(fr, "", "Список инструментов / ресурсов на экране", min_gap=2.2)
+    # 1) One frame per GitHub project slug (listicle archive gold)
+    for slug, fr in by_slug.items():
+        _add(fr, "", f"Проект {slug}", min_gap=1.8)
         if len(picks) >= max_moments:
             break
 
-    # 2) Step-aligned frames
+    # 2) Step / ordinal speech first (OCR on this reel is often % noise)
     step_keys = sorted(set([n for n, _ in speech_steps] + list(by_step.keys())))
     for n in step_keys:
         if len(picks) >= max_moments:
             break
         fr = by_step.get(n)
         quote = ""
+        seg_start = 0.0
         for sn, seg in speech_steps:
             if sn == n:
                 quote = seg.get("text") or ""
+                seg_start = float(seg.get("start") or 0)
                 break
         if fr:
             _add(fr, quote or f"Шаг {n}", f"Экран шага {n}")
+        elif quote and not any(abs(seg_start - t) < 2.0 for t in used_ts):
+            used_ts.append(seg_start)
+            picks.append(
+                {
+                    "t_sec": seg_start + 0.4,
+                    "quote": quote[:160],
+                    "caption": quote[:160],
+                    "why": f"Проект / пункт {n} по речи",
+                    "when_to_apply": f"При шаге {n}",
+                    "_atlas_path": None,
+                    "_ocr": "",
+                }
+            )
 
-    # 3) Remaining high-score OCR
+    # 3) Resource/brand screens (skip CTA-only / already-covered / %-noise)
+    for fr in resource_frames:
+        if _slug_key_from_text(fr.text or "") in used_slugs:
+            continue
+        if _percent_density(fr.text or "") >= 0.15 and not _BRANDISH.search(fr.text or ""):
+            continue
+        if _percent_density(fr.text or "") >= 0.12 and not re.search(r"\.(io|com|app)\b", fr.text or "", re.I):
+            continue
+        _add(fr, "", "Список инструментов / ресурсов на экране", min_gap=2.2)
+        if len(picks) >= max_moments:
+            break
+
+    # 4) Remaining high-score OCR
     if len(picks) < min(4, max_moments):
         for _sc, fr in scored:
+            if _percent_density(fr.text or "") >= 0.15 and not _GITHUB_SLUG.search(fr.text or ""):
+                continue
             _add(fr, "", "Информативный кадр с текстом")
             if len(picks) >= max_moments:
                 break
@@ -739,6 +849,59 @@ async def build_key_moments(
     listicle = detect_listicle(material.raw_text, segments, atlas)
     candidates = _candidate_segments(segments, duration) if segments else []
 
+    # Talking-head / empty OCR: do not invent moments via speech/LLM/ratio fallback
+    # Allow text-overlay reels (split-screen brands) even with thin usable_ocr count
+    from app.services.resources import (
+        extract_overlay_product_names,
+        is_speech_offtopic,
+        speech_unreliable,
+    )
+
+    usable_ocr_n = sum(1 for a in atlas if (a.text or "").strip() and not ocr_is_garble(a.text))
+
+    def _overlay_rich(fr: AtlasFrame) -> bool:
+        text = (fr.text or "").strip()
+        if not text or ocr_is_garble(text):
+            return False
+        if _BRANDISH.search(text):
+            return True
+        if extract_overlay_product_names(text):
+            return True
+        return score_atlas_frame(fr, duration=duration, listicle=False) > 3.5
+
+    overlay_n = sum(1 for a in atlas if _overlay_rich(a))
+    speech_off = is_speech_offtopic(material.raw_text or "")
+    if atlas and not listicle and usable_ocr_n < 2 and overlay_n < 1:
+        material.key_moments = []
+        log.info(
+            "moments_skip_talking_head",
+            material_id=material.id,
+            usable_ocr=usable_ocr_n,
+            overlay_n=overlay_n,
+            listicle=False,
+        )
+        await session.commit()
+        return material
+
+    # Weak ASR + thin on-screen evidence → skip (avoids inventing moments on talking-head)
+    if (
+        atlas
+        and not listicle
+        and speech_unreliable(material.raw_text or "")
+        and usable_ocr_n < 3
+        and overlay_n < 2
+    ):
+        material.key_moments = []
+        log.info(
+            "moments_skip_weak_evidence",
+            material_id=material.id,
+            usable_ocr=usable_ocr_n,
+            overlay_n=overlay_n,
+            speech_off=speech_off,
+        )
+        await session.commit()
+        return material
+
     picks: list[dict] = []
     if listicle and atlas:
         picks = build_listicle_picks(atlas, segments, duration=duration, max_moments=6)
@@ -747,12 +910,13 @@ async def build_key_moments(
         picks = build_ocr_picks(atlas, duration=duration, max_moments=5)
 
     # Fill thin / front-loaded OCR with speech highlights spaced across the timeline
+    # Skip speech fills when audio is offtopic (ad jingle ≠ on-screen topic)
     need_speech = len(picks) < 4 or (
         duration >= 90
         and picks
         and max(float(p.get("t_sec") or 0) for p in picks) < duration * 0.35
     )
-    if need_speech and candidates:
+    if need_speech and candidates and not speech_off and not speech_unreliable(material.raw_text or ""):
         spread = _spread_speech_picks(
             candidates,
             duration=duration,
@@ -777,8 +941,8 @@ async def build_key_moments(
             picks.sort(key=lambda p: float(p.get("t_sec") or 0))
             picks = picks[:5]
 
-    # LLM fallback if still empty
-    if not picks:
+    # LLM / speech fallback if still empty — skip when spoken audio is offtopic
+    if not picks and not speech_off:
         feed = candidates or segments
         timed_preview = "\n".join(
             f"[{int(s['start'])//60}:{int(s['start'])%60:02d}] {s['text']}" for s in feed[:40]
@@ -829,6 +993,12 @@ async def build_key_moments(
                 for c in candidates[:5]
             ]
         picks = llm_picks
+    elif not picks and speech_off:
+        log.info(
+            "moments_skip_offtopic_speech_fallback",
+            material_id=material.id,
+            overlay_n=overlay_n,
+        )
 
     moments: list[dict] = []
 
@@ -942,6 +1112,11 @@ async def build_key_moments(
 
             usable_ocr = ocr_sanitize(ocr_text or "")
             from app.services.local_ocr import ocr_caption_weak
+
+            # Drop percent-noise OCR when we already have a speech/listicle caption
+            if usable_ocr and _percent_density(usable_ocr) >= 0.15 and not _BRANDISH.search(usable_ocr):
+                if quote or (caption_hint and _BRANDISH.search(caption_hint or "")):
+                    usable_ocr = ""
 
             caption = usable_ocr
             if not caption or ocr_caption_weak(caption):

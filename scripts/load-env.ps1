@@ -28,6 +28,15 @@ if (-not $env:STORAGE_PATH -or $env:STORAGE_PATH -match "^\./") {
     $env:STORAGE_PATH = Join-Path $root "data\files"
 }
 
+# Chronicum lite API is :8010 (avoid clashing with other local apps on :8000).
+# Force web client URL even if shell inherited NEXT_PUBLIC_API_URL=...:8000.
+$env:CHRONICUM_API_PORT = if ($env:CHRONICUM_API_PORT) { $env:CHRONICUM_API_PORT } else { "8010" }
+$apiBase = "http://127.0.0.1:$($env:CHRONICUM_API_PORT)"
+$env:NEXT_PUBLIC_API_URL = $apiBase
+if (-not $env:CHRONICUM_API_URL -or $env:CHRONICUM_API_URL -match ":8000") {
+    $env:CHRONICUM_API_URL = $apiBase
+}
+
 $keyLen = if ($env:GROQ_API_KEY) { $env:GROQ_API_KEY.Length } else { 0 }
 $tgReady = $env:TELEGRAM_BOT_TOKEN -and ($env:TELEGRAM_BOT_TOKEN -notin @("replace_me", "changeme", "xxx"))
 Write-Host ("Chronicum env loaded from .env (GROQ_API_KEY len={0}, telegram_ready={1})" -f $keyLen, $tgReady)

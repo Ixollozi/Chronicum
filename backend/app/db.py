@@ -21,7 +21,7 @@ def configure_sqlite_engine(target_engine) -> None:
         cursor = dbapi_conn.cursor()
         try:
             cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=15000")
+            cursor.execute("PRAGMA busy_timeout=30000")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA synchronous=NORMAL")
         finally:
@@ -43,7 +43,7 @@ def _make_engine():
                     path = PROJECT_ROOT / path
                 path.parent.mkdir(parents=True, exist_ok=True)
                 url = f"sqlite+aiosqlite:///{path.as_posix()}"
-        kwargs = {"connect_args": {"check_same_thread": False, "timeout": 15}}
+        kwargs = {"connect_args": {"check_same_thread": False, "timeout": 30}}
     eng = create_async_engine(url, **kwargs)
     if is_sqlite:
         configure_sqlite_engine(eng)

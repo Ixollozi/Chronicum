@@ -34,8 +34,10 @@ def test_coerce_and_merge_links():
         ["CapCut"],
         [{"url": "https://docs.python.org/3/", "title": "Python docs", "source": "llm"}],
         h,
+        raw_text=text,
     )
-    assert "CapCut" in tools
+    # CapCut not in speech/OCR → ungrounded LLM tool dropped
+    assert "CapCut" not in tools
     py = next(x for x in links if "docs.python.org" in x["url"])
     assert py["title"] == "Python docs"
 

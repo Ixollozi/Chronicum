@@ -25,6 +25,10 @@ cp .env.example .env
 .\scripts\start-lite.ps1
 ```
 
+Откроется http://127.0.0.1:3000. Вход:
+- **Continue with Google** (когда заданы `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` и `JWT_SECRET` в `.env`). Для MCP после логина создай **Personal API Token** (`chr_...`) в **Настройки → Аккаунт**.
+- Либо по Bearer-токену (**Personal API Token** `chr_...`, или локальный `WEB_API_TOKEN` при отключённом Google OAuth / `ALLOW_ADMIN_TOKEN=true`).
+
 ### Linux / macOS
 
 ```bash
@@ -60,11 +64,12 @@ docker compose up --build -d
 
 ## Веб-страницы
 
-- `/` — спросить базу / сохранить ссылку, задачу, правило или заметку; оценка качества ответа («Полезно / Мимо»)
+- `/` — спросить базу / сохранить ссылку, задачу, правило, пакет ссылок или заметку; оценка качества ответа («Полезно / Мимо»)
 - `/archive` — каталог с расширенными фильтрами (статус, категория, источник, тип записи, минимальный score, тег, сортировка) и гибридным поиском
-- `/graph` — сеть материалов, тегов и категорий + прямые связи между материалами (по смыслу и общим инструментам)
-- `/m/[id]` — карточка материала (выжимка, объяснение, оценка, ключевые моменты, код, ссылки, озвучка)
-- `/settings` — режимы разбора, **cookies для Instagram / TikTok / YouTube**, личный контекст, пул API-ключей (Groq + Gemini), **модерация предложенных тегов**, подключение MCP к IDE
+- `/graph` — сеть материалов, тегов, клиентов и категорий + прямые связи между материалами (по смыслу и общим инструментам/ссылкам)
+- `/clients` — карточки клиентов, история переписки, быстрая вставка тредов (paste preview/commit) и контекст-паки для MCP
+- `/m/[id]` — карточка материала (выжимка, объяснение, оценка, доказательства/grounding, ключевые моменты, код, ссылки, озвучка)
+- `/settings` — **аккаунт (Google OAuth + Personal API Tokens `chr_...`)**, режимы разбора, **cookies для Instagram / TikTok / YouTube**, личный контекст, пул API-ключей (Groq + Gemini), **модерация предложенных тегов**, подключение MCP к IDE
 - **PWA** — веб-кабинет включает `site.webmanifest` и service worker (`/sw.js`) для установки на рабочий стол/телефон и оффлайн-оболочки
 
 ## Bot commands
@@ -96,7 +101,7 @@ docker compose up --build -d
 
 - AI, поиск и транскрибация: `GROQ_API_KEY`, `GOOGLE_AI_API_KEY`, `GROQ_LLM_MODEL`, `GROQ_WHISPER_MODEL`, `WHISPER_LANGUAGE`, `WHISPER_MAX_FILE_MB`, `WHISPER_CHUNK_SECONDS`, `YOUTUBE_PREFER_CAPTIONS`, `EMBEDDING_PROVIDER`, `GOOGLE_EMBEDDING_MODEL`.
 - Медиа и OCR: `MEDIA_COOKIES_FILE`, `MEDIA_COOKIES_FROM_BROWSER`, `TESSERACT_CMD`, `VIDEO_CONCURRENCY`, `ATLAS_SCENE_DETECT`, `ATLAS_SCENE_THRESHOLD`, `OCR_CONCURRENCY`.
-- Безопасность: `WEB_API_TOKEN`, `NEXT_PUBLIC_WEB_API_TOKEN`, `SECRETS_ENCRYPTION_KEY`, `ALLOW_QUERY_TOKEN`, `TELEGRAM_ALLOW_PUBLIC`, `CORS_ORIGINS`, `ALLOW_PLACEHOLDER_SECRETS=false` для не-dev окружений.
+- Безопасность и авторизация: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `JWT_SECRET`, `JWT_TTL_DAYS`, `WEB_ORIGIN`, `ALLOW_ADMIN_TOKEN`, `WEB_API_TOKEN`, `SECRETS_ENCRYPTION_KEY`, `ALLOW_QUERY_TOKEN`, `TELEGRAM_ALLOW_PUBLIC`, `CORS_ORIGINS`, `ALLOW_PLACEHOLDER_SECRETS=false` для не-dev окружений.
 - MCP stdio-клиент: `CHRONICUM_API_URL`, `CHRONICUM_TOKEN`.
 
 ## Backup

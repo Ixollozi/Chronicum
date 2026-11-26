@@ -5,9 +5,12 @@ import {
   clearToken,
   client,
   getToken,
+  isAuthError,
   type ApiKeyItem,
   type AppSettings,
+  type AuthMe,
   type CookiesStatus,
+  type PersonalApiToken,
   type PersonalProfile,
   type TagItem,
   type TagStatusValue,
@@ -62,7 +65,7 @@ const TABS = [
     id: "ide" as const,
     label: "IDE",
     hint: "Cursor · MCP",
-    tip: "Cursor, VS Code и Insiders открываются диплинком. Claude / Windsurf — JSON или CLI. User Rules IDE сама не пропишет — копируй правило.",
+    tip: "Токен MCP и подключение к Cursor / VS Code. Google OAuth в MCP не работает — только Personal API Token.",
   },
 ];
 
@@ -198,6 +201,10 @@ export default function SettingsPage() {
   const [cookiesBusy, setCookiesBusy] = useState(false);
   const [cookiesFlash, setCookiesFlash] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [me, setMe] = useState<AuthMe | null>(null);
+  const [mcpTokens, setMcpTokens] = useState<PersonalApiToken[]>([]);
+  const [tokenLabel, setTokenLabel] = useState("Cursor MCP");
+  const [freshToken, setFreshToken] = useState<string | null>(null);
   const [health, setHealth] = useState<{
     status: string;
     mode: string;
@@ -242,7 +249,11 @@ export default function SettingsPage() {
   }, [tagStatus]);
 
   useEffect(() => {
-    loadSettings().catch((e) => setError(e instanceof Error ? e.message : "Ошибка"));
+    if (!getToken()) return;
+    loadSettings().catch((e) => {
+      if (isAuthError(e)) return;
+      setError(e instanceof Error ? e.message : "Ошибка");
+    });
     client
       .getCookiesStatus()
       .then(setCookiesStatus)
@@ -253,9 +264,31 @@ export default function SettingsPage() {
       .catch(() => undefined);
   }, [loadSettings]);
 
+  const loadAccount = useCallback(async () => {
+    const profile = await client.authMe();
+    setMe(profile);
+    if (profile.id) {
+      setMcpTokens(await client.listAuthTokens());
+    } else {
+      setMcpTokens([]);
+    }
+  }, []);
+
   useEffect(() => {
+    if (!getToken()) return;
+    loadAccount().catch((e) => {
+      if (isAuthError(e)) return;
+      setError(e instanceof Error ? e.message : "Ошибка");
+    });
+  }, [loadAccount]);
+
+  useEffect(() => {
+    if (!getToken()) return;
     if (tab === "keys") {
-      loadKeys().catch((e) => setError(e instanceof Error ? e.message : "Ошибка"));
+      loadKeys().catch((e) => {
+        if (isAuthError(e)) return;
+        setError(e instanceof Error ? e.message : "Ошибка");
+      });
     }
     if (tab === "tags") {
       loadTags().catch((e) => setError(e instanceof Error ? e.message : "Ошибка"));
@@ -351,6 +384,8 @@ export default function SettingsPage() {
     }
   }
 
+  const mcpBearer = freshToken || getToken();
+
   const lede =
     tab === "context"
       ? "Короткие ответы — и ИИ оценивает материалы именно для тебя, а не «вообще»."
@@ -359,7 +394,7 @@ export default function SettingsPage() {
         : tab === "tags"
           ? "Новые теги от ИИ ждут одобрения, чтобы словарь оставался чистым."
           : tab === "ide"
-            ? "Cursor ставится диплинком. MCP крутится на том же API, что и кабинет. User Rules IDE не умеет принимать с сайта — копируй текст."
+            ? "Сначала создай токен MCP, затем подключай IDE. Cursor ставится диплинком; User Rules IDE не умеет принимать с сайта — копируй текст."
             : "Глубина разбора, автомоменты и расшифровка видео по умолчанию.";
 
   return (
@@ -402,6 +437,64 @@ export default function SettingsPage() {
             {lede}
           </p>
         </header>
+
+        <div className="settings-account" aria-label="Аккаунт Google">
+          {me ? (
+            <>
+              {me.picture_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={me.picture_url}
+                  alt=""
+                  width={44}
+                  height={44}
+                  className="settings-account-avatar"
+                />
+              ) : (
+                <div className="settings-account-avatar settings-account-avatar--fallback" aria-hidden="true">
+                  {(me.name || me.email || "?").slice(0, 1).toUpperCase()}
+                </div>
+              )}
+              <div className="settings-account-main">
+                <p className="settings-account-name">
+                  {me.name || (me.is_admin ? "Admin / Dev" : "—")}
+                </p>
+                <p className="settings-account-email">
+                  {me.email || (me.is_admin ? "WEB_API_TOKEN (bootstrap)" : "без email")}
+                </p>
+              </div>
+              <div className="settings-account-actions">
+                <button
+                  type="button"
+                  className="settings-btn"
+                  onClick={() => {
+                    setTab("ide");
+                    setError(null);
+                  }}
+                >
+                  {mcpTokens.length > 0
+                    ? `MCP · ${mcpTokens.length}`
+                    : "Токен MCP"}
+                </button>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  onClick={async () => {
+                    await client.authLogout().catch(() => undefined);
+                    clearToken();
+                    window.location.href = "/";
+                  }}
+                >
+                  Выйти
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="settings-field-help" style={{ margin: 0 }}>
+              Загрузка аккаунта…
+            </p>
+          )}
+        </div>
 
       <div className="settings-chrome">
         <div
@@ -1191,9 +1284,118 @@ export default function SettingsPage() {
         <div className="settings-panel" role="tabpanel" aria-label={activeTab.label}>
           <div className="settings-section-head">
             <div>
-              <p className="settings-kicker">Агенты</p>
+              <p className="settings-kicker">1 · Доступ</p>
               <h2 className="settings-section-title">
-                Подключить Chronicum
+                Personal API Token
+                <Tip text="Cursor и Claude принимают только Bearer из конфига. Google OAuth в MCP не открывается." />
+              </h2>
+            </div>
+          </div>
+
+          {!me?.id ? (
+            <p className="settings-field-help">
+              Токены MCP привязаны к Google-аккаунту сверху.
+            </p>
+          ) : (
+            <>
+              <div className="settings-add">
+                <input
+                  value={tokenLabel}
+                  onChange={(e) => setTokenLabel(e.target.value)}
+                  placeholder="Подпись (Cursor MCP)"
+                  className="settings-input"
+                  autoComplete="off"
+                />
+                <div className="settings-toolbar mt-3">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    className="settings-btn primary"
+                    onClick={async () => {
+                      setBusy(true);
+                      setError(null);
+                      try {
+                        const created = await client.createAuthToken(tokenLabel || undefined);
+                        setFreshToken(created.token);
+                        setMcpTokens(await client.listAuthTokens());
+                      } catch (e) {
+                        setError(e instanceof Error ? e.message : "Ошибка");
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    Создать токен
+                  </button>
+                </div>
+              </div>
+              {freshToken && (
+                <div className="settings-info mt-4">
+                  <p className="settings-kicker">Покажи один раз</p>
+                  <pre className="settings-ide-rule break-all whitespace-pre-wrap">{freshToken}</pre>
+                  <div className="settings-ide-actions mt-3">
+                    <button
+                      type="button"
+                      className="settings-btn primary"
+                      onClick={() => copyText("pat", freshToken)}
+                    >
+                      {copied === "pat" ? "Скопировано" : "Скопировать токен"}
+                    </button>
+                    <a className="settings-btn primary" href={cursorMcpInstallLink(freshToken)}>
+                      Добавить в Cursor
+                    </a>
+                  </div>
+                  <p className="settings-field-help mt-2">
+                    Сохрани токен — повторно его не показать. Потом можно отозвать.
+                  </p>
+                </div>
+              )}
+              <ul className="settings-key-list mt-4">
+                {mcpTokens.map((t) => (
+                  <li key={t.id} className="settings-key-row">
+                    <div>
+                      <p className="settings-info-text">
+                        <strong>{t.label || "MCP token"}</strong>{" "}
+                        <span className="settings-key-mono">{t.token_prefix}…</span>
+                      </p>
+                      <p className="settings-field-help">
+                        создан {t.created_at ? new Date(t.created_at).toLocaleString() : "—"}
+                        {t.last_used_at
+                          ? ` · last ${new Date(t.last_used_at).toLocaleString()}`
+                          : ""}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="settings-btn danger"
+                      onClick={async () => {
+                        if (!window.confirm("Отозвать токен?")) return;
+                        await client.revokeAuthToken(t.id);
+                        if (freshToken?.startsWith(t.token_prefix)) setFreshToken(null);
+                        setMcpTokens(await client.listAuthTokens());
+                      }}
+                    >
+                      Отозвать
+                    </button>
+                  </li>
+                ))}
+                {mcpTokens.length === 0 && (
+                  <li className="settings-empty">
+                    <p className="settings-empty-title" style={{ fontFamily: "var(--font-display)" }}>
+                      Токенов нет
+                    </p>
+                    <p className="settings-empty-desc">Создай Personal API Token для Cursor MCP</p>
+                  </li>
+                )}
+              </ul>
+            </>
+          )}
+
+          <div className="settings-section-head mt-8">
+            <div>
+              <p className="settings-kicker">2 · Подключение</p>
+              <h2 className="settings-section-title">
+                Добавить в IDE
                 <Tip text="Cursor откроет диалог установки MCP. Подтверди его. Сайт не может тихо прописать конфиг или User Rules." />
               </h2>
             </div>
@@ -1216,14 +1418,19 @@ export default function SettingsPage() {
             </p>
           </div>
 
+          <p className="settings-field-help mb-3">
+            В кнопках ниже —{" "}
+            {freshToken ? "свежий PAT" : mcpTokens.length > 0 ? "сессия Google (лучше создай PAT)" : "сессия"}.
+            Для Cursor надёжнее Personal API Token сверху.
+          </p>
           <div className="settings-ide-actions">
-            <a className="settings-btn primary" href={cursorMcpInstallLink(getToken())}>
+            <a className="settings-btn primary" href={cursorMcpInstallLink(mcpBearer)}>
               Добавить в Cursor
             </a>
-            <a className="settings-btn primary" href={vscodeMcpInstallLink(getToken())}>
+            <a className="settings-btn primary" href={vscodeMcpInstallLink(mcpBearer)}>
               Добавить в VS Code
             </a>
-            <a className="settings-btn" href={vscodeMcpInstallLink(getToken(), apiOrigin(), "vscode-insiders")}>
+            <a className="settings-btn" href={vscodeMcpInstallLink(mcpBearer, apiOrigin(), "vscode-insiders")}>
               VS Code Insiders
             </a>
           </div>
@@ -1242,28 +1449,28 @@ export default function SettingsPage() {
             <button
               type="button"
               className="settings-btn"
-              onClick={() => copyText("claude", claudeDesktopSnippet(getToken()))}
+              onClick={() => copyText("claude", claudeDesktopSnippet(mcpBearer))}
             >
               {copied === "claude" ? "JSON скопирован" : "Claude Desktop"}
             </button>
             <button
               type="button"
               className="settings-btn"
-              onClick={() => copyText("code", claudeCodeCommand(getToken()))}
+              onClick={() => copyText("code", claudeCodeCommand(mcpBearer))}
             >
               {copied === "code" ? "Команда скопирована" : "Claude Code CLI"}
             </button>
             <button
               type="button"
               className="settings-btn"
-              onClick={() => copyText("windsurf", windsurfSnippet(getToken()))}
+              onClick={() => copyText("windsurf", windsurfSnippet(mcpBearer))}
             >
               {copied === "windsurf" ? "JSON скопирован" : "Windsurf"}
             </button>
             <button
               type="button"
               className="settings-btn"
-              onClick={() => copyText("vscodejson", vscodeMcpJsonSnippet(getToken()))}
+              onClick={() => copyText("vscodejson", vscodeMcpJsonSnippet(mcpBearer))}
             >
               {copied === "vscodejson" ? "JSON скопирован" : "VS Code mcp.json"}
             </button>

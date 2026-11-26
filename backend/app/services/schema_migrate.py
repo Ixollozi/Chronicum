@@ -17,16 +17,53 @@ MATERIAL_EXTRA_COLUMNS: dict[str, str] = {
     "code_blocks": "JSON",
     "entry_kind": "TEXT DEFAULT 'knowledge'",
     "embedding": "JSON",
+    "analysis_confidence": "FLOAT",
+    "trust_level": "TEXT",
+    "evidence": "JSON",
+    "locked_fields": "JSON",
 }
+
+SEARCH_FEEDBACK_EXTRA_COLUMNS: dict[str, str] = {
+    "answer": "TEXT",
+    "source_ids": "JSON",
+    "helpful": "BOOLEAN DEFAULT 1",
+    "useful": "BOOLEAN",
+    "comment": "TEXT",
+}
+
+CLIENT_EXTRA_COLUMNS: dict[str, str] = {
+    "canon_facts": "TEXT",
+    "summary_up_to_message_id": "VARCHAR(36)",
+    "user_id": "VARCHAR(36)",
+}
+
+# materials.user_id was INTEGER (telegram); SQLite affinity accepts UUID strings without rewrite.
+MATERIAL_USER_ID_NOTE = "user_id stored as TEXT affinity for Google account UUIDs"
+
+CLIENT_MESSAGE_EXTRA_COLUMNS: dict[str, str] = {
+    "speaker": "VARCHAR(20) DEFAULT 'unknown'",
+    "speaker_name": "VARCHAR(200)",
+    "kind": "VARCHAR(20) DEFAULT 'text'",
+    "event_at": "DATETIME",
+    "content_hash": "VARCHAR(64)",
+}
+
+
+async def _add_missing(conn: AsyncConnection, table: str, columns: dict[str, str]) -> None:
+    rows = (await conn.execute(text(f"PRAGMA table_info({table})"))).mappings().all()
+    if not rows:
+        return
+    existing = {r["name"] for r in rows}
+    for col, typ in columns.items():
+        if col not in existing:
+            await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {typ}"))
 
 
 async def ensure_schema(conn: AsyncConnection) -> None:
     from app.db import Base
 
     await conn.run_sync(Base.metadata.create_all)
-
-    rows = (await conn.execute(text("PRAGMA table_info(materials)"))).mappings().all()
-    existing = {r["name"] for r in rows}
-    for col, typ in MATERIAL_EXTRA_COLUMNS.items():
-        if col not in existing:
-            await conn.execute(text(f"ALTER TABLE materials ADD COLUMN {col} {typ}"))
+    await _add_missing(conn, "materials", MATERIAL_EXTRA_COLUMNS)
+    await _add_missing(conn, "clients", CLIENT_EXTRA_COLUMNS)
+    await _add_missing(conn, "client_messages", CLIENT_MESSAGE_EXTRA_COLUMNS)
+    await _add_missing(conn, "search_feedback", SEARCH_FEEDBACK_EXTRA_COLUMNS)

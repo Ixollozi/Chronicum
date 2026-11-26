@@ -67,15 +67,19 @@ New-NetFirewallRule -DisplayName "Chronicum LAN TCP 3000" -Direction Inbound -Pr
 New-NetFirewallRule -DisplayName "Chronicum LAN TCP 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
 ```
 
-### Вход в веб-кабинет (`WEB_API_TOKEN`)
+### Вход в веб-кабинет (Google OAuth и Bearer / PAT токены)
 
-В Chronicum нет Google OAuth — авторизация работает по статическому Bearer-токену (`WEB_API_TOKEN` в `.env`, проверяется в `backend/app/api/deps.py` через заголовок `Authorization: Bearer <token>`).
+Chronicum поддерживает два способа авторизации (проверяются в `backend/app/api/deps.py` через `Authorization: Bearer <token>`):
 
-1. Открой с телефона `http://<LAN-IP>:3000`.
-2. Если `NEXT_PUBLIC_WEB_API_TOKEN` не задан (рекомендуется для LAN), откроется экран входа (`AppShell.tsx`) с полем **`WEB_API_TOKEN`**.
-3. Введи значение `WEB_API_TOKEN` из `.env` и нажми **«Войти»** — браузер сохранит токен в `localStorage` под ключом `chronicum_token` и будет отправлять его в `Authorization: Bearer ...` на каждый запрос к API.
+1. **Google OAuth + JWT-сессия (рекомендуется для основного кабинета):**
+   - Задай `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `JWT_SECRET` и `WEB_ORIGIN=http://<LAN-IP>.nip.io:3000` (Google OAuth не принимает сырые приватные IP в Redirect URI, поэтому для входа через Google с телефона используй `nip.io`-домен и добавь `http://<LAN-IP>.nip.io:8010/api/auth/google/callback` в Authorized Redirect URIs в Google Cloud Console).
+   - После входа через **Continue with Google** можно выпустить личный **Personal API Token (`chr_...`)** в **Настройки → Аккаунт** — он работает для MCP, скриптов и прямого входа по токену с любого устройства в LAN (включая сырой `<LAN-IP>`).
+2. **Вход по Bearer-токену (`chr_...` PAT или `WEB_API_TOKEN`):**
+   - Открой с телефона `http://<LAN-IP>:3000`.
+   - Если Google OAuth не настроен — сразу откроется форма входа по токену; если Google OAuth включён — нажми **«Войти по API-токену»**.
+   - Введи Personal API Token (`chr_...`) или `WEB_API_TOKEN` (при отключённом Google OAuth или `ALLOW_ADMIN_TOKEN=true`) и нажми **«Войти»** — кабинет проверит токен через API, сохранит его в `localStorage` (`chronicum_token`) и будет передавать в `Authorization: Bearer ...`. При ответе `401` сессия автоматически сбрасывается на экран входа.
 
-> **Важно про безопасность:** переменные `NEXT_PUBLIC_*` вшиваются Next.js прямо в клиентский JS-бандл. Для локальной сети держи `NEXT_PUBLIC_WEB_API_TOKEN` пустым и вводи `WEB_API_TOKEN` вручную на экране входа.
+> **Важно про безопасность:** переменные `NEXT_PUBLIC_*` вшиваются Next.js прямо в клиентский JS-бандл. Для локальной сети держи `NEXT_PUBLIC_WEB_API_TOKEN` пустым и вводи токен вручную на экране входа либо используй Google OAuth.
 
 ### URL с телефона
 
@@ -102,7 +106,7 @@ Chronicum работает напрямую по сырому LAN IP — `nip.io
 ## 4. Подводные камни
 
 - **Сменился Wi‑Fi / IP** → обнови `<LAN-IP>` в `CORS_ORIGINS` (`.env`) и `NEXT_PUBLIC_API_URL` (`web/.env.local`), затем перезапусти API и `next dev`.
-- **Опечатка в токене или смена `WEB_API_TOKEN`** → сейчас форма входа сохраняет введённую строку в `localStorage` (`chronicum_token`) без предпроверки; если API отвечает `401`, очисти данные сайта в браузере (или выполни `localStorage.removeItem("chronicum_token")`) и обнови страницу.
+- **Опечатка в токене или смена `WEB_API_TOKEN`** → форма входа проверяет токен перед сохранением, а при ответе API `401` кабинет автоматически сбрасывает токен в `localStorage` (`chronicum_token`) и возвращает на экран входа.
 - **CORS-ошибка в браузере телефона** → проверь, что точный адрес из адресной строки телефона (`http://<LAN-IP>:3000` без завершающего `/`) есть в `CORS_ORIGINS` и backend перезапущен.
 - **Только локальная сеть** → из мобильного интернета (LTE/5G) адрес `<LAN-IP>` недоступен.
 

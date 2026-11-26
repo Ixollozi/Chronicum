@@ -4,7 +4,7 @@
       "command": "D:\\Cursor\\Chronicum\\.venv\\Scripts\\python.exe",
       "args": ["-m", "chronicum_mcp"],
       "env": {
-        "CHRONICUM_API_URL": "http://127.0.0.1:8000",
+        "CHRONICUM_API_URL": "http://127.0.0.1:8010",
         "CHRONICUM_TOKEN": "chronicum-dev-token"
       }
     }

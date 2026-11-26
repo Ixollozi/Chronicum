@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.logging_setup import get_logger
 from app.models import EntryKind, ProcessingStatus
 from app.search import answer_question
-from app.services.processing import create_material
+from app.services.processing import create_material, needs_enqueue
 from app.services.queue import enqueue_material
 from app.services.sources import UnsupportedSourceError, classify_url
 from app.services.storage import text_sha256, url_sha256
@@ -75,7 +75,7 @@ DEFAULT_REFUSE = (
 )
 
 ComposerMode = Literal["auto", "ask", "knowledge", "task", "rule"]
-Intent = Literal["url", "note", "search", "refuse", "task", "rule"]
+Intent = Literal["url", "note", "search", "refuse", "task", "rule", "batch"]
 
 _MODE_ALIASES = {
     "auto": "auto",
@@ -104,6 +104,8 @@ class ComposerResult:
     material_id: str | None = None
     answer: str | None = None
     sources: list | None = None
+    already_exists: bool = False
+    items: list[dict] = field(default_factory=list)
 
 
 def normalize_mode(mode: str | None) -> ComposerMode:
@@ -119,18 +121,44 @@ def strip_mode_prefix(text: str) -> tuple[str, ComposerMode | None]:
     return text[m.end() :].strip(), normalize_mode(m.group(1))
 
 
+def extract_urls(text: str) -> list[str]:
+    """Unique URLs in order of appearance (tracking tails stripped via hash later)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in URL_RE.finditer(text or ""):
+        url = m.group(0).rstrip(").,]\"'")
+        key = url_sha256(url)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(url)
+    return out
+
+
+def _url_paste_only(text: str, urls: list[str]) -> bool:
+    """True when the paste is basically one or more links, not a long note with a URL."""
+    if not urls:
+        return False
+    cleaned = (text or "").strip()
+    if len(urls) == 1:
+        return cleaned == urls[0] or (len(cleaned) < 280 and cleaned.startswith("http"))
+    # Multi-URL: strip URLs and leftover whitespace/punctuation — little prose left
+    remainder = cleaned
+    for u in urls:
+        remainder = remainder.replace(u, " ")
+    remainder = re.sub(r"[\s,;|]+", " ", remainder).strip()
+    return len(remainder) < 40
+
+
 def classify_intent(text: str) -> Intent:
     """Heuristic intent (URL / search / note) for auto mode."""
     raw = text.strip()
     if not raw:
         return "note"
 
-    url_match = URL_RE.search(raw)
-    if url_match:
-        cleaned = raw.strip()
-        url = url_match.group(0).rstrip(").,]\"'")
-        if cleaned == url or (len(cleaned) < 280 and cleaned.startswith("http")):
-            return "url"
+    urls = extract_urls(raw)
+    if urls and _url_paste_only(raw, urls):
+        return "url"
 
     lower = raw.lower()
     if raw.endswith("?") or lower.startswith(QUESTION_START):
@@ -154,47 +182,144 @@ def _entry_kind_for_mode(mode: ComposerMode) -> str:
     return EntryKind.KNOWLEDGE.value
 
 
-async def _enqueue_url(session: AsyncSession, url: str, *, entry_kind: str) -> ComposerResult:
+async def _maybe_requeue_failed(session: AsyncSession, material, already_exists: bool) -> None:
+    if already_exists and material.processing_status == ProcessingStatus.FAILED.value:
+        material.processing_status = ProcessingStatus.QUEUED.value
+        material.error_message = None
+        await session.commit()
+
+
+async def _enqueue_url(
+    session: AsyncSession, url: str, *, entry_kind: str, user_id: str | None = None
+) -> ComposerResult:
     try:
         source_type = classify_url(url)
     except UnsupportedSourceError as e:
         raise ValueError(str(e)) from e
-    material = await create_material(
+    out = await create_material(
         session,
         source_type=source_type,
         source_url=url,
         content_hash=url_sha256(url),
         entry_kind=entry_kind,
+        user_id=user_id,
     )
-    if not (material.summary and material.processing_status == ProcessingStatus.DONE.value):
+    material = out.material
+    will = needs_enqueue(material, out.already_exists)
+    if will:
+        await _maybe_requeue_failed(session, material, out.already_exists)
         await enqueue_material(material.id)
     label = {
         EntryKind.TASK.value: "задача",
         EntryKind.RULE.value: "правило",
     }.get(entry_kind, source_type)
+    if out.already_exists and not will:
+        msg = "Уже в архиве"
+    elif out.already_exists:
+        msg = "Повторно в очереди"
+    else:
+        msg = f"{label} принят в очередь"
     return ComposerResult(
         intent="task" if entry_kind == EntryKind.TASK.value else ("rule" if entry_kind == EntryKind.RULE.value else "url"),
-        message=f"{label} принят в очередь",
+        message=msg,
         material_id=material.id,
+        already_exists=out.already_exists,
+        items=[{
+            "id": material.id,
+            "status": material.processing_status,
+            "already_exists": out.already_exists,
+        }],
     )
 
 
-async def _enqueue_note(session: AsyncSession, text: str, *, entry_kind: str) -> ComposerResult:
-    material = await create_material(
+async def _enqueue_urls(
+    session: AsyncSession, urls: list[str], *, entry_kind: str, user_id: str | None = None
+) -> ComposerResult:
+    if len(urls) == 1:
+        return await _enqueue_url(session, urls[0], entry_kind=entry_kind, user_id=user_id)
+
+    items: list[dict] = []
+    for url in urls:
+        try:
+            source_type = classify_url(url)
+        except UnsupportedSourceError as e:
+            raise ValueError(str(e)) from e
+        out = await create_material(
+            session,
+            source_type=source_type,
+            source_url=url,
+            content_hash=url_sha256(url),
+            entry_kind=entry_kind,
+            user_id=user_id,
+        )
+        material = out.material
+        will = needs_enqueue(material, out.already_exists)
+        if will:
+            await _maybe_requeue_failed(session, material, out.already_exists)
+            await enqueue_material(material.id)
+        items.append({
+            "id": material.id,
+            "status": material.processing_status,
+            "already_exists": out.already_exists,
+        })
+
+    existed = sum(1 for it in items if it["already_exists"])
+    fresh = len(items) - existed
+    msg = f"Принято {len(items)}"
+    if existed:
+        msg += f" ({existed} уже были)"
+    if fresh:
+        msg += f", в очереди {fresh}"
+    return ComposerResult(
+        intent="batch",
+        message=msg,
+        material_id=items[0]["id"] if items else None,
+        already_exists=existed == len(items) and len(items) > 0,
+        items=items,
+    )
+
+
+async def _enqueue_note(
+    session: AsyncSession, text: str, *, entry_kind: str, user_id: str | None = None
+) -> ComposerResult:
+    out = await create_material(
         session,
         source_type="note",
         note_text=text,
         content_hash=text_sha256(f"{entry_kind}:{text}"),
         title=text[:80],
         entry_kind=entry_kind,
+        user_id=user_id,
     )
-    if not (material.summary and material.processing_status == ProcessingStatus.DONE.value):
+    material = out.material
+    will = needs_enqueue(material, out.already_exists)
+    if will:
+        await _maybe_requeue_failed(session, material, out.already_exists)
         await enqueue_material(material.id)
-    if entry_kind == EntryKind.TASK.value:
-        return ComposerResult(intent="task", message="Задача принята в очередь", material_id=material.id)
-    if entry_kind == EntryKind.RULE.value:
-        return ComposerResult(intent="rule", message="Правило принято в очередь", material_id=material.id)
-    return ComposerResult(intent="note", message="Заметка принята в очередь", material_id=material.id)
+    if out.already_exists and not will:
+        msg = "Уже в архиве"
+    elif out.already_exists:
+        msg = "Повторно в очереди"
+    elif entry_kind == EntryKind.TASK.value:
+        msg = "Задача принята в очередь"
+    elif entry_kind == EntryKind.RULE.value:
+        msg = "Правило принято в очередь"
+    else:
+        msg = "Заметка принята в очередь"
+    intent: Intent = "task" if entry_kind == EntryKind.TASK.value else (
+        "rule" if entry_kind == EntryKind.RULE.value else "note"
+    )
+    return ComposerResult(
+        intent=intent,
+        message=msg,
+        material_id=material.id,
+        already_exists=out.already_exists,
+        items=[{
+            "id": material.id,
+            "status": material.processing_status,
+            "already_exists": out.already_exists,
+        }],
+    )
 
 
 async def run_composer(
@@ -202,11 +327,13 @@ async def run_composer(
     text: str,
     *,
     mode: str | None = "auto",
+    user_id: str | None = None,
 ) -> ComposerResult:
     text = (text or "").strip()
     if not text:
         raise ValueError("Empty input")
 
+    scope = user_id is not None
     if is_jailbreak_attempt(text):
         log.info("composer_refused", kind="jailbreak", chars=len(text))
         return ComposerResult(
@@ -229,7 +356,9 @@ async def run_composer(
         raise ValueError("Empty input")
 
     if resolved == "ask":
-        answer, materials = await answer_question(session, text)
+        answer, materials = await answer_question(
+            session, text, user_id=user_id, scope_user=scope
+        )
         return ComposerResult(
             intent="search",
             message="Ответ по базе",
@@ -238,26 +367,24 @@ async def run_composer(
         )
 
     entry_kind = _entry_kind_for_mode(resolved)
+    urls = extract_urls(text)
 
     if resolved in {"task", "rule", "knowledge"}:
-        url_match = URL_RE.search(text)
-        if url_match:
-            url = url_match.group(0).rstrip(").,]\"'")
-            cleaned = text.strip()
-            if cleaned == url or (len(cleaned) < 280 and cleaned.startswith("http")):
-                return await _enqueue_url(session, url, entry_kind=entry_kind)
-        return await _enqueue_note(session, text, entry_kind=entry_kind)
+        if urls and _url_paste_only(text, urls):
+            return await _enqueue_urls(session, urls, entry_kind=entry_kind, user_id=user_id)
+        return await _enqueue_note(session, text, entry_kind=entry_kind, user_id=user_id)
 
     # auto
     intent = classify_intent(text)
     if intent == "url":
-        m = URL_RE.search(text)
-        assert m
-        url = m.group(0).rstrip(").,]\"'")
-        return await _enqueue_url(session, url, entry_kind=EntryKind.KNOWLEDGE.value)
+        return await _enqueue_urls(
+            session, urls, entry_kind=EntryKind.KNOWLEDGE.value, user_id=user_id
+        )
 
     if intent == "search":
-        answer, materials = await answer_question(session, text)
+        answer, materials = await answer_question(
+            session, text, user_id=user_id, scope_user=scope
+        )
         return ComposerResult(
             intent="search",
             message="Ответ по базе",
@@ -265,4 +392,6 @@ async def run_composer(
             sources=materials,
         )
 
-    return await _enqueue_note(session, text, entry_kind=EntryKind.KNOWLEDGE.value)
+    return await _enqueue_note(
+        session, text, entry_kind=EntryKind.KNOWLEDGE.value, user_id=user_id
+    )

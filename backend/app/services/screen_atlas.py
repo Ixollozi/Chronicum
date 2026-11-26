@@ -170,24 +170,66 @@ def load_atlas_json(path: Path | str) -> list[AtlasFrame]:
 
 
 def strip_ocr_blocks(raw_text: str | None) -> str:
-    """Remove timed/legacy OCR sections from raw_text (speech remains)."""
+    """Remove timed/legacy OCR sections from raw_text (speech remains).
+
+    Also drops ``[Слайд N]`` blocks whose body is a raw ``[OCR]`` dump
+    (GitHub chrome / keyword soup). Clean vision slides without ``[OCR]``
+    are kept as caption-level evidence.
+    """
     if not raw_text:
         return ""
-    lines = []
+    lines: list[str] = []
     skipping = False
+    pending_slide: str | None = None
     for line in raw_text.splitlines():
         s = line.strip()
-        if s.startswith(OCR_BLOCK_HEADER) or s.startswith("[On-screen text OCR"):
-            skipping = True
-            continue
         if skipping:
-            if _OCR_LINE.match(s) or not s:
+            if (
+                _OCR_LINE.match(s)
+                or not s
+                or re.fullmatch(r"\[OCR\]", s, re.I)
+                or s.startswith(OCR_BLOCK_HEADER)
+                or s.startswith("[On-screen text OCR")
+            ):
+                continue
+            if re.match(r"^\[Слайд\s+\d+\]", s, re.I):
+                pending_slide = line
+                skipping = False
                 continue
             if s.startswith("[") and not s.upper().startswith("[OCR"):
                 skipping = False
                 lines.append(line)
             continue
+        if (
+            s.startswith(OCR_BLOCK_HEADER)
+            or s.startswith("[On-screen text OCR")
+            or re.fullmatch(r"\[OCR\]", s, re.I)
+        ):
+            pending_slide = None
+            skipping = True
+            continue
+        if re.match(r"^\[Слайд\s+\d+\]\s*$", s, re.I):
+            pending_slide = line
+            continue
+        if pending_slide is not None:
+            if re.fullmatch(r"\[OCR\]", s, re.I):
+                pending_slide = None
+                skipping = True
+                continue
+            # Chrome slide body (GitHub widgets / IG chrome) must not enter spoken
+            try:
+                from app.services.grounding import is_chrome_ocr
+
+                if is_chrome_ocr(s):
+                    pending_slide = None
+                    continue
+            except Exception:
+                pass
+            lines.append(pending_slide)
+            pending_slide = None
         lines.append(line)
+    if pending_slide is not None and not skipping:
+        lines.append(pending_slide)
     return "\n".join(lines).strip()
 
 
@@ -354,6 +396,13 @@ async def build_screen_atlas(
                 continue
         kept.append(fr)
 
+    # Vision pass: OCR often misses small browser-bar URLs (owner/repo).
+    # Only when a bare host is visible but no full path was read.
+    try:
+        await _vision_fill_urls(kept)
+    except Exception as e:
+        log.warning("vision_url_fill_failed", error=str(e)[:200])
+
     # Keep top-N by score as files; drop weaker file paths but keep text in list
     by_score = sorted(kept, key=lambda f: f.score, reverse=True)
     keep_paths = {id(f) for f in by_score[:keep_top_n]}
@@ -377,6 +426,27 @@ async def build_screen_atlas(
         concurrency=concurrency,
     )
     return kept
+
+
+async def _vision_fill_urls(frames: list[AtlasFrame]) -> None:
+    """Append vision-read URLs to frames that show a bare host without path."""
+    host_re = re.compile(r"\b(?:github\.com|gitlab\.com|bitbucket\.org)\b", re.I)
+    full_re = re.compile(r"(?:github|gitlab|bitbucket)\.(?:com|org)/[\w.-]+/[\w.-]+", re.I)
+    if any(full_re.search(f.text or "") for f in frames):
+        return
+    targets = [f for f in frames if f.path and host_re.search(f.text or "")][:2]
+    if not targets:
+        return
+    from app.ai.vision import extract_visible_urls
+
+    for fr in targets:
+        try:
+            urls = await asyncio.wait_for(extract_visible_urls(fr.path or ""), timeout=45)
+        except Exception:
+            continue
+        for u in urls:
+            if u and u.lower() not in (fr.text or "").lower():
+                fr.text = f"{fr.text} {u}".strip()
 
 
 def find_atlas_dir_for_media(media_path: str | None, material_atlas: str | Path | None = None) -> Path | None:

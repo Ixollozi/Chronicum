@@ -225,6 +225,27 @@ def download_instagram_public(
                 assets = parsed
                 break
 
+        if not assets and shortcode != "media":
+            # Full Chrome headers get an empty JS app shell from Instagram;
+            # a bare UA gets the lite embed with sidecar JSON + og tags.
+            for page_url in (
+                f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
+                f"https://www.instagram.com/p/{shortcode}/embed/",
+                url,
+            ):
+                try:
+                    page = client.get(page_url, headers={"User-Agent": "Mozilla/5.0"})
+                    lite = page.text or ""
+                except Exception as exc:
+                    log.warning("instagram_lite_page_failed", error=str(exc)[:160])
+                    continue
+                if lite:
+                    html = lite
+                parsed = parse_instagram_html_assets(lite)
+                if parsed:
+                    assets = parsed
+                    break
+
         og_image = re.search(
             r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
             html,

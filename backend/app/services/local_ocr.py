@@ -24,11 +24,13 @@ _SALVAGE_RE = re.compile(
     r"#\s*\d{1,2}"
     r"|https?://[^\s<>\"')\]]+"
     r"|[\w.-]+\.(?:com|io|app|org|net)\b"
+    r"|[\w.-]+\.zip\b"
     r"|\b(?:facebook|slack|premiere(?:\s*pro)?|davinci(?:\s*resolve)?|final\s*cut|"
-    r"capcut|envato(?:elements)?|storyblocks|pexels|unsplash|chatgpt|figma|"
-    r"photoshop|canva|notion|midjourney|runway|artlist|descript|opus\s*clip|"
-    r"motionarray|dafont|fonts\.google(?:\.com)?|creativemarket|lumetri|"
-    r"report\s*card)\b"
+    r"capcut|envato(?:elements)?|storyblocks|pexels|unsplash|chatgpt|claude|"
+    r"gemini(?:\s*omni)?|seedance|omniflash|omni\s*flash|google\s*flow|cloth|"
+    r"figma|photoshop|canva|notion|pencil|midjourney|runway|artlist|descript|"
+    r"opus\s*clip|motionarray|dafont|fonts\.google(?:\.com)?|creativemarket|"
+    r"lumetri|report\s*card|skillspector|nvidia|cursor|github)\b"
     r"|\b\d{1,3}%"
     r"|\b\d{1,3}\s*(?:дней|друзей|сообщений|мин|час(?:ов)?)\b"
     r")",
@@ -46,6 +48,13 @@ _KNOWN_LAT = {
     "envatoelements",
     "storyblocks",
     "chatgpt",
+    "claude",
+    "gemini",
+    "omni",
+    "seedance",
+    "omniflash",
+    "cloth",
+    "pencil",
     "report",
     "card",
     "lumetri",
@@ -57,6 +66,35 @@ _KNOWN_LAT = {
     "opacity",
     "layer",
     "timeline",
+    "notion",
+    "flow",
+    "skillspector",
+    "nvidia",
+    "cursor",
+    "github",
+    "download",
+    "unsplash",
+    "photoshop",
+    "midjourney",
+    "runway",
+    "descript",
+    "motionarray",
+    "creativemarket",
+    "dafont",
+    "tenchat",
+    "kwork",
+    "codex",
+    "logo",
+    "design",
+    "skill",
+    "skills",
+    "agent",
+    "agents",
+    "install",
+    "tests",
+    "test",
+    "use",
+    "music",
 }
 
 
@@ -94,6 +132,61 @@ def _rapid_engine():
     return RapidOCR()
 
 
+@lru_cache
+def _rapid_engine_v3():
+    """RapidOCR v3 (PP-OCRv5) with Cyrillic recognition — reads RU slides/screens.
+
+    The v1 engine has no Cyrillic model and transliterates Russian into
+    Latin lookalike soup; v3 cyrillic rec is the primary engine when present.
+    """
+    from rapidocr import LangRec, ModelType, OCRVersion, RapidOCR
+
+    return RapidOCR(
+        params={
+            "Det.ocr_version": OCRVersion.PPOCRV5,
+            "Det.model_type": ModelType.MOBILE,
+            "Rec.ocr_version": OCRVersion.PPOCRV5,
+            "Rec.model_type": ModelType.MOBILE,
+            "Rec.lang_type": LangRec.CYRILLIC,
+            "Global.log_level": "error",
+        }
+    )
+
+
+def _ocr_path_rapid_v3(path: str) -> str:
+    engine = _rapid_engine_v3()
+    out = engine(path)
+    txts = getattr(out, "txts", None)
+    if not txts:
+        return ""
+    return re.sub(r"\s+", " ", " ".join(str(t) for t in txts)).strip()
+
+
+def _salvage_token_ok(tok: str) -> bool:
+    """Reject Latinized-Cyrillic soup that shape-matches brand patterns.
+
+    Real salvage: URLs/domains/#N/percents, known brand words, clean numbers.
+    Soup markers: digit+letter case flips (71noAo3pHTe), unknown pure-Latin
+    words (MupyioTcyHaoc), CamelCase compounds of unknown words (FalCup).
+    """
+    low = tok.lower()
+    if any(ch in tok for ch in "./#%"):
+        return True
+    if re.fullmatch(r"\d{1,3}", tok):
+        return True
+    if re.search(r"\d", tok) and re.search(r"[a-z][A-Z]|[A-Z][a-z][A-Z]", tok):
+        return False
+    words = re.findall(r"[A-Za-z]+", low)
+    if words and all(w in _KNOWN_LAT for w in words):
+        return True
+    # Multi-word known phrases (premiere pro / google flow / opus clip)
+    if words and any(w in _KNOWN_LAT for w in words) and len(words) <= 3:
+        return all(
+            w in _KNOWN_LAT or len(w) <= 3 for w in words
+        )
+    return False
+
+
 def ocr_salvage(text: str) -> str:
     """Keep only high-confidence tokens (brands, URLs, #N, key numbers)."""
     if not text:
@@ -104,6 +197,8 @@ def ocr_salvage(text: str) -> str:
         tok = re.sub(r"\s+", " ", m.group(0)).strip()
         key = tok.lower()
         if key in seen:
+            continue
+        if not _salvage_token_ok(tok):
             continue
         seen.add(key)
         found.append(tok)
@@ -128,6 +223,18 @@ def ocr_is_garble(text: str) -> bool:
     cyr = sum(1 for c in letters if "\u0400" <= c <= "\u04FF")
     cyr_ratio = cyr / len(letters)
     if cyr_ratio >= 0.30:
+        return False
+
+    # Real bilingual OCR (v3 Cyrillic engine): whole Cyrillic words present and
+    # few mixed-script tokens → readable text, not transliteration soup.
+    _toks = cleaned.split()
+    _cyr_toks = [
+        t for t in _toks if re.search(r"[А-Яа-яЁё]{2,}", t) and not re.search(r"[A-Za-z]", t)
+    ]
+    _mixed_toks = [
+        t for t in _toks if re.search(r"[А-Яа-яЁё]", t) and re.search(r"[A-Za-z]", t)
+    ]
+    if len(_cyr_toks) >= 2 and len(_mixed_toks) <= max(1, len(_toks) // 5):
         return False
 
     # Few salvageable tokens vs long Latin soup → garble
@@ -204,42 +311,78 @@ def ocr_caption_weak(text: str) -> bool:
     return False
 
 
+def _ocr_path_rapid(path: str) -> str:
+    # Primary: v3 Cyrillic engine; fallback: legacy v1 (en/zh only)
+    try:
+        text = _ocr_path_rapid_v3(path)
+        if text:
+            return text
+    except Exception as e:
+        log.warning("rapidocr_v3_failed", path=path, error=str(e)[:200])
+    try:
+        engine = _rapid_engine()
+        result, _ = engine(str(path))
+        if not result:
+            return ""
+        parts = []
+        for item in result:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                t = str(item[1]).strip()
+                if t:
+                    parts.append(t)
+        return re.sub(r"\s+", " ", " ".join(parts)).strip()
+    except Exception as e:
+        log.warning("rapidocr_failed", path=path, error=str(e)[:200])
+        return ""
+
+
+def _ocr_path_tesseract(path: str) -> str:
+    try:
+        import pytesseract
+        from PIL import Image
+
+        try:
+            text = pytesseract.image_to_string(Image.open(path), lang="rus+eng")
+        except Exception:
+            text = pytesseract.image_to_string(Image.open(path))
+        return re.sub(r"\s+", " ", (text or "").strip())
+    except Exception as e:
+        log.warning("tesseract_ocr_failed", path=path, error=str(e)[:160])
+        return ""
+
+
+def _ocr_path(path: str) -> str:
+    if configure_tesseract():
+        raw = _ocr_path_tesseract(path)
+        if raw:
+            return raw
+    return _ocr_path_rapid(path)
+
+
 def ocr_image_file(path: str) -> str:
     """Return cleaned on-screen text from an image path (local/free)."""
     p = Path(path)
     if not p.exists():
         return ""
 
-    raw = ""
-    if configure_tesseract():
+    cleaned = ocr_sanitize(_ocr_path(path))
+    if len(cleaned) >= 40:
+        return cleaned
+
+    # White-on-dark designs (slides, dark UI) defeat detectors — retry inverted
+    try:
+        from PIL import Image, ImageOps
+
+        img = Image.open(path).convert("RGB")
+        inv = ImageOps.autocontrast(ImageOps.invert(img))
+        tmp = p.with_name(p.stem + "_inv.jpg")
+        inv.save(tmp, quality=92)
         try:
-            import pytesseract
-            from PIL import Image
-
-            try:
-                text = pytesseract.image_to_string(Image.open(path), lang="rus+eng")
-            except Exception:
-                text = pytesseract.image_to_string(Image.open(path))
-            raw = re.sub(r"\s+", " ", (text or "").strip())
-        except Exception as e:
-            log.warning("tesseract_ocr_failed", path=path, error=str(e)[:160])
-            raw = ""
-
-    if not raw:
-        try:
-            engine = _rapid_engine()
-            result, _ = engine(str(path))
-            if not result:
-                return ""
-            parts = []
-            for item in result:
-                if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    t = str(item[1]).strip()
-                    if t:
-                        parts.append(t)
-            raw = re.sub(r"\s+", " ", " ".join(parts)).strip()
-        except Exception as e:
-            log.warning("rapidocr_failed", path=path, error=str(e)[:200])
-            return ""
-
-    return ocr_sanitize(raw)
+            alt = ocr_sanitize(_ocr_path(str(tmp)))
+        finally:
+            tmp.unlink(missing_ok=True)
+        if len(alt) > len(cleaned):
+            return alt
+    except Exception as e:
+        log.warning("ocr_invert_retry_failed", path=path, error=str(e)[:160])
+    return cleaned

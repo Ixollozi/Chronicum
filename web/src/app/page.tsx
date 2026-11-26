@@ -157,6 +157,11 @@ export default function HomePage() {
         setLastQuery(value);
         return;
       }
+      if (res.intent === "batch" || (res.items && res.items.length > 1)) {
+        setText("");
+        router.push("/archive?status=queued");
+        return;
+      }
       if (res.material_id) {
         setText("");
         router.push(`/m/${res.material_id}`);
@@ -179,7 +184,12 @@ export default function HomePage() {
         : file.type.startsWith("video/")
           ? "video"
           : undefined;
-      const res = await client.upload(file, kind);
+      const maybeUrl = text.trim();
+      const sourceUrl =
+        /^https?:\/\//i.test(maybeUrl) || /instagram\.com|youtu\.be|youtube\.com|tiktok\.com/i.test(maybeUrl)
+          ? maybeUrl
+          : undefined;
+      const res = await client.upload(file, kind, sourceUrl);
       router.push(`/m/${res.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка загрузки");

@@ -69,7 +69,7 @@ export default function MaterialPage() {
   const [touchY, setTouchY] = useState<number | null>(null);
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  async function load() {
+  const load = useCallback(async () => {
     try {
       const data = await client.getMaterial(id);
       setM(data);
@@ -78,15 +78,21 @@ export default function MaterialPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Ошибка");
     }
-  }
+  }, [id]);
 
   useEffect(() => {
-    load();
-    const busy = m && ["queued", "processing"].includes(m.processing_status);
-    const t = setInterval(load, busy ? 2000 : 5000);
+    void load();
+  }, [load]);
+
+  const activePolling = m?.processing_status === "queued" || m?.processing_status === "processing";
+
+  useEffect(() => {
+    if (!activePolling) return;
+    const t = setInterval(() => {
+      void load();
+    }, 1500);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, m?.processing_status]);
+  }, [activePolling, load]);
 
   const slides: Slide[] = useMemo(() => {
     if (!m) return [{ id: "overview", label: "Обзор" }];
@@ -228,8 +234,18 @@ export default function MaterialPage() {
   const source = SOURCE_LABEL[m.source_type] || m.source_type;
   const kindLabel = ENTRY_KIND_LABEL[entryKind] || null;
   const category = cleanMetaPart(m.category);
-  const isProcessing = ["queued", "processing"].includes(m.processing_status);
-  const cardReady = !isProcessing && m.processing_status !== "failed";
+  const isProcessing = m.processing_status === "queued" || m.processing_status === "processing";
+  const hasCardContent = Boolean(
+    (digest || "").trim() ||
+      (m.main_idea || "").trim() ||
+      (m.key_ideas?.length ?? 0) > 0 ||
+      (m.practical_takeaways?.length ?? 0) > 0
+  );
+  const isFailed =
+    !isProcessing &&
+    (m.processing_status === "failed" || (Boolean(m.error_message) && !hasCardContent));
+  const effectiveStatus = isFailed ? "failed" : m.processing_status;
+  const cardReady = !isProcessing && !isFailed;
   const digestKicker =
     entryKind === "task" ? "Чеклист" : entryKind === "rule" ? "Формула" : "Выжимка";
   const ideasKicker =
@@ -250,22 +266,24 @@ export default function MaterialPage() {
               <Link href="/archive" className="deck-back">
                 ← Архив
               </Link>
-              <StatusPill status={m.processing_status} />
+              <StatusPill status={effectiveStatus} />
             </div>
           </header>
           <div className="deck-stage deck-stage--proc">
             <MaterialProcessing
               title={m.title}
               sourceLabel={source}
-              status={m.processing_status}
-              stage={m.processing_stage}
+              status={effectiveStatus}
+              stage={isFailed ? null : m.processing_stage}
+              errorMessage={isFailed ? m.error_message : null}
               retryBusy={busy === "retry"}
               onRetry={
-                m.processing_status === "failed"
+                isFailed
                   ? () => void run("retry", () => client.retry(m.id).then(() => client.getMaterial(m.id)))
                   : undefined
               }
             />
+            {actionErr && <p className="deck-error text-center">{actionErr}</p>}
           </div>
         </div>
       </div>
@@ -431,12 +449,17 @@ export default function MaterialPage() {
 
                 {!hasOverviewBody && (
                   <div className="deck-waiting">
-                    <p className="deck-kicker">{isProcessing ? "В работе" : "Пока пусто"}</p>
+                    <p className="deck-kicker">Пока пусто</p>
                     <p>
-                      {isProcessing
-                        ? "Материал обрабатывается — выжимка появится здесь."
-                        : "Запустите обогащение или полную обработку, чтобы заполнить карточку."}
+                      Запустите обогащение или полную обработку, чтобы заполнить карточку.
                     </p>
+                  </div>
+                )}
+
+                {m.error_message && (
+                  <div className="deck-reprocess-warn" role="status">
+                    <p className="deck-kicker">Повторная обработка не завершилась</p>
+                    <p className="deck-reprocess-warn-text">{m.error_message}</p>
                   </div>
                 )}
               </div>
@@ -590,34 +613,34 @@ export default function MaterialPage() {
                   <button
                     type="button"
                     role="menuitem"
+                    disabled={!!busy}
                     className="deck-menu-item"
-                    onClick={async () => {
-                      await client.retry(m.id);
-                      await load();
-                      setShowMore(false);
-                    }}
+                    onClick={() =>
+                      void run("retry", () => client.retry(m.id).then(() => client.getMaterial(m.id)))
+                    }
                   >
                     <span>
                       <span className="deck-menu-title">Повторить</span>
                       <span className="deck-menu-desc">Запустить разбор заново</span>
                     </span>
-                    <span className="deck-menu-trail">›</span>
+                    <span className="deck-menu-trail">{busy === "retry" ? "…" : "›"}</span>
                   </button>
                   <button
                     type="button"
                     role="menuitem"
+                    disabled={!!busy}
                     className="deck-menu-item"
-                    onClick={async () => {
-                      await client.processFull(m.id);
-                      await load();
-                      setShowMore(false);
-                    }}
+                    onClick={() =>
+                      void run("processFull", () =>
+                        client.processFull(m.id).then(() => client.getMaterial(m.id))
+                      )
+                    }
                   >
                     <span>
                       <span className="deck-menu-title">Полная обработка</span>
                       <span className="deck-menu-desc">Глубокий проход по материалу</span>
                     </span>
-                    <span className="deck-menu-trail">›</span>
+                    <span className="deck-menu-trail">{busy === "processFull" ? "…" : "›"}</span>
                   </button>
                 </section>
 
@@ -825,18 +848,8 @@ export default function MaterialPage() {
             ← Архив
           </Link>
           <StatusPill status={m.processing_status} />
-          {(isProcessing || m.processing_status === "awaiting_full" || m.error_message) && (
-            <span
-              className={`deck-status-note ${
-                m.error_message || m.processing_status === "failed" ? "is-warn" : ""
-              }`}
-            >
-              {m.error_message
-                ? "ошибка"
-                : m.processing_status === "awaiting_full"
-                  ? "ждёт полной обработки"
-                  : "обрабатывается…"}
-            </span>
+          {m.processing_status === "awaiting_full" && (
+            <span className="deck-status-note">ждёт полной обработки</span>
           )}
         </div>
       </header>

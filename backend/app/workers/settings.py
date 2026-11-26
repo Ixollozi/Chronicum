@@ -16,10 +16,9 @@ from app.db import SessionLocal
 from app.logging_setup import get_logger, setup_logging
 from app.models import Material, MaterialTag
 from app.services.processing import process_material
+from app.services.queue import is_video_source, release_video_slot, try_acquire_video_slot
 
 log = get_logger(__name__)
-
-VIDEO_LOCK_KEY = "chronicum:video_lock"
 
 
 def _redis_settings() -> RedisSettings:
@@ -114,7 +113,7 @@ async def process_material_job(ctx, material_id: str, force_full: bool = False) 
     log.info("job_start", material_id=material_id, job_id=job_id, force_full=force_full)
 
     r = redis.from_url(settings.redis_url)
-    lock_acquired = False
+    slot_acquired = False
     try:
         async with SessionLocal() as session:
             material = (
@@ -123,21 +122,28 @@ async def process_material_job(ctx, material_id: str, force_full: bool = False) 
             if not material:
                 return
 
-            if material.source_type in {"youtube", "instagram", "tiktok", "video"}:
-                lock_acquired = bool(await r.set(VIDEO_LOCK_KEY, material_id, nx=True, ex=3600))
-                if not lock_acquired:
-                    # Another video job holds the lock — requeue shortly
+            if is_video_source(material.source_type):
+                slot_acquired = await try_acquire_video_slot(
+                    r,
+                    material_id,
+                    max_slots=settings.video_concurrency,
+                )
+                if not slot_acquired:
                     pool = await get_arq_pool()
                     try:
                         await pool.enqueue_job(
                             "process_material_job",
                             material_id,
                             force_full,
-                            _defer_by=30,
+                            _defer_by=15,
                         )
                     finally:
                         await pool.aclose()
-                    log.info("video_deferred_concurrency", material_id=material_id)
+                    log.info(
+                        "video_deferred_concurrency",
+                        material_id=material_id,
+                        video_concurrency=settings.video_concurrency,
+                    )
                     return
 
             try:
@@ -166,8 +172,8 @@ async def process_material_job(ctx, material_id: str, force_full: bool = False) 
                     reply_markup=material_keyboard_dict(material_id, failed=True),
                 )
     finally:
-        if lock_acquired:
-            await r.delete(VIDEO_LOCK_KEY)
+        if slot_acquired:
+            await release_video_slot(r, material_id)
         await r.aclose()
 
 
@@ -180,4 +186,9 @@ class WorkerSettings:
     @staticmethod
     async def on_startup(ctx):
         setup_logging(get_settings().log_level)
-        log.info("worker_started", max_jobs=get_settings().arq_max_jobs)
+        s = get_settings()
+        log.info(
+            "worker_started",
+            max_jobs=s.arq_max_jobs,
+            video_concurrency=s.video_concurrency,
+        )

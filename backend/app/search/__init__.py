@@ -111,7 +111,14 @@ def _score_material(m: Material, query_pairs: list[tuple[str, str]]) -> float:
     return score
 
 
-async def _sqlite_search(session: AsyncSession, query: str, limit: int) -> list[SearchHit]:
+async def _sqlite_search(
+    session: AsyncSession,
+    query: str,
+    limit: int,
+    *,
+    user_id: str | None = None,
+    scope_user: bool = False,
+) -> list[SearchHit]:
     tokens = _tokens(query)
     if not tokens:
         stripped = normalize_text(query).strip()
@@ -173,16 +180,19 @@ async def _sqlite_search(session: AsyncSession, query: str, limit: int) -> list[
 
     materials: list[Material] = []
     if conds:
+        where = [
+            Material.processing_status == ProcessingStatus.DONE.value,
+            or_(*conds),
+        ]
+        if scope_user:
+            where.append(Material.user_id == user_id if user_id else Material.user_id.is_(None))
         result = await session.execute(
             select(Material)
             .options(
                 selectinload(Material.category),
                 selectinload(Material.tags).selectinload(MaterialTag.tag),
             )
-            .where(
-                Material.processing_status == ProcessingStatus.DONE.value,
-                or_(*conds),
-            )
+            .where(*where)
             .limit(120)
         )
         materials = list(result.scalars().unique().all())
@@ -203,6 +213,8 @@ async def _semantic_candidates(
     *,
     limit: int = 24,
     scan_limit: int = 400,
+    user_id: str | None = None,
+    scope_user: bool = False,
 ) -> dict[str, tuple[Material, float]]:
     """
     Compute cosine similarity between the query embedding and recent DONE materials.
@@ -227,6 +239,9 @@ async def _semantic_candidates(
     min_sim_primary = 0.24 if q_model == LOCAL_EMBED_MODEL else 0.42
     min_sim_local = 0.24
 
+    sem_where = [Material.processing_status == ProcessingStatus.DONE.value]
+    if scope_user:
+        sem_where.append(Material.user_id == user_id if user_id else Material.user_id.is_(None))
     rows = (
         await session.execute(
             select(
@@ -240,7 +255,7 @@ async def _semantic_candidates(
                 Material.practical_takeaways,
                 Material.embedding,
             )
-            .where(Material.processing_status == ProcessingStatus.DONE.value)
+            .where(*sem_where)
             .order_by(Material.created_at.desc())
             .limit(scan_limit)
         )
@@ -310,8 +325,13 @@ async def _merge_hybrid_hits(
     query: str,
     lexical_hits: list[SearchHit],
     limit: int,
+    *,
+    user_id: str | None = None,
+    scope_user: bool = False,
 ) -> list[SearchHit]:
-    sem_map = await _semantic_candidates(session, query, limit=max(limit * 3, 16))
+    sem_map = await _semantic_candidates(
+        session, query, limit=max(limit * 3, 16), user_id=user_id, scope_user=scope_user
+    )
     if not sem_map:
         return lexical_hits[:limit]
 
@@ -334,18 +354,34 @@ async def _merge_hybrid_hits(
     return ranked[:limit]
 
 
-async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[SearchHit]:
+async def fts_search(
+    session: AsyncSession,
+    query: str,
+    limit: int = 8,
+    *,
+    user_id: str | None = None,
+    scope_user: bool = False,
+) -> list[SearchHit]:
     q = query.strip()
     if not q:
         return []
 
     if get_settings().is_sqlite:
-        lexical = await _sqlite_search(session, q, max(limit * 2, 16))
-        return await _merge_hybrid_hits(session, q, lexical, limit)
+        lexical = await _sqlite_search(session, q, max(limit * 2, 16), user_id=user_id, scope_user=scope_user)
+        return await _merge_hybrid_hits(session, q, lexical, limit, user_id=user_id, scope_user=scope_user)
+
+    owner_sql = ""
+    params: dict = {"q": q, "limit": max(limit * 2, 16)}
+    if scope_user:
+        if user_id:
+            owner_sql = " AND m.user_id = :uid"
+            params["uid"] = user_id
+        else:
+            owner_sql = " AND m.user_id IS NULL"
 
     # Postgres: combine Russian morphological FTS + simple FTS (for exact EN/brand tokens)
     sql = text(
-        """
+        f"""
         WITH q AS (
           SELECT plainto_tsquery('russian', :q) || plainto_tsquery('simple', :q) AS tsq
         )
@@ -363,6 +399,7 @@ async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[
                ) AS rank
         FROM materials m, q
         WHERE m.processing_status = 'done'
+          {owner_sql}
           AND (
             (m.search_vector IS NOT NULL AND m.search_vector::tsvector @@ q.tsq)
             OR (
@@ -379,7 +416,7 @@ async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[
         """
     )
     try:
-        rows = (await session.execute(sql, {"q": q, "limit": max(limit * 2, 16)})).all()
+        rows = (await session.execute(sql, params)).all()
     except Exception:
         rows = []
     ids = [r[0] for r in rows]
@@ -395,10 +432,10 @@ async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[
         )
         materials = {m.id: m for m in result.scalars().all()}
         lexical = [SearchHit(material=materials[i], rank=ranks[i]) for i in ids if i in materials]
-        return await _merge_hybrid_hits(session, q, lexical, limit)
+        return await _merge_hybrid_hits(session, q, lexical, limit, user_id=user_id, scope_user=scope_user)
 
-    lexical = await _sqlite_search(session, q, max(limit * 2, 16))
-    return await _merge_hybrid_hits(session, q, lexical, limit)
+    lexical = await _sqlite_search(session, q, max(limit * 2, 16), user_id=user_id, scope_user=scope_user)
+    return await _merge_hybrid_hits(session, q, lexical, limit, user_id=user_id, scope_user=scope_user)
 
 
 def _format_sources_fallback(prefix: str, hits: list[SearchHit]) -> str:
@@ -411,8 +448,14 @@ def _format_sources_fallback(prefix: str, hits: list[SearchHit]) -> str:
     return "\n".join(lines)
 
 
-async def answer_question(session: AsyncSession, question: str) -> tuple[str, list[Material]]:
-    hits = await fts_search(session, question)
+async def answer_question(
+    session: AsyncSession,
+    question: str,
+    *,
+    user_id: str | None = None,
+    scope_user: bool = False,
+) -> tuple[str, list[Material]]:
+    hits = await fts_search(session, question, user_id=user_id, scope_user=scope_user)
     if not hits:
         return (
             "Не нашёл релевантных материалов в базе. Попробуй другие формулировки или добавь контент.",
@@ -423,7 +466,11 @@ async def answer_question(session: AsyncSession, question: str) -> tuple[str, li
     for i, hit in enumerate(hits, 1):
         m = hit.material
         sources_block.append(
-            f"[{i}] id={m.id}\ntitle={m.title}\nsummary={m.summary}\nmain_idea={m.main_idea}\n"
+            f"[{i}] id={m.id}\ntitle={m.title}\n"
+            f"trust={getattr(m, 'trust_level', None)} conf={getattr(m, 'analysis_confidence', None)}\n"
+            f"summary={m.summary}\nmain_idea={m.main_idea}\n"
+            f"digest={(getattr(m, 'digest', None) or '')[:500]}\n"
+            f"tools={m.tools or []}\n"
             f"source_url={m.source_url or ''}\n"
         )
 

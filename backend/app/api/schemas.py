@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class MaterialListItem(BaseModel):
@@ -19,6 +19,8 @@ class MaterialListItem(BaseModel):
     usefulness_score: int | None
     processing_status: str
     processing_stage: str | None
+    trust_level: str | None = None
+    analysis_confidence: float | None = None
     created_at: datetime | None
 
     model_config = {"from_attributes": True}
@@ -40,6 +42,8 @@ class MaterialDetail(MaterialListItem):
     usage_tokens_out: int = 0
     usage_audio_seconds: float = 0
     digest: str | None = None
+    evidence: list[Any] = Field(default_factory=list)
+    locked_fields: list[Any] = Field(default_factory=list)
     detailed_explanation: str | None = None
     objective_evaluation: dict[str, Any] | None = None
     ai_opinion: str | None = None
@@ -66,6 +70,23 @@ class ScoreUpdate(BaseModel):
     reason: str | None = None
 
 
+class MaterialPatch(BaseModel):
+    title: str | None = None
+    summary: str | None = None
+    main_idea: str | None = None
+    digest: str | None = None
+    tools: list[Any] | None = None
+    links: list[Any] | None = None
+    usefulness_score: int | None = Field(default=None, ge=1, le=10)
+    note: str | None = None
+
+
+class CorrectionCreate(BaseModel):
+    field: str  # alias | repo | banned_tool
+    value: dict[str, Any]
+    note: str | None = None
+
+
 class CategoryCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
 
@@ -83,12 +104,20 @@ class TtsRequest(BaseModel):
     voice: str = Field(default="svetlana", description="svetlana | dmitry")
 
 
+class ComposerBatchItem(BaseModel):
+    id: str
+    status: str
+    already_exists: bool = False
+
+
 class ComposerResponse(BaseModel):
     intent: str
     message: str
     material_id: str | None = None
     answer: str | None = None
     sources: list[MaterialListItem] = Field(default_factory=list)
+    already_exists: bool = False
+    items: list[ComposerBatchItem] = Field(default_factory=list)
 
 
 class GraphNode(BaseModel):
@@ -131,14 +160,26 @@ class SearchFeedbackCreate(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000)
     answer: str | None = Field(default=None, max_length=12000)
     source_ids: list[str] = Field(default_factory=list, max_length=30)
-    helpful: bool
+    helpful: bool | None = None
+    useful: bool | None = None
     comment: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def _normalize_flag(self) -> "SearchFeedbackCreate":
+        if self.helpful is None and self.useful is None:
+            raise ValueError("Either helpful or useful must be provided")
+        flag = bool(self.helpful if self.helpful is not None else self.useful)
+        self.helpful = flag
+        self.useful = flag
+        return self
 
 
 class SearchFeedbackOut(BaseModel):
     id: int
     query: str
     helpful: bool
+    useful: bool = True
+    ok: bool = True
     source_ids: list[str] = Field(default_factory=list)
     comment: str | None = None
     created_at: datetime | None = None
@@ -174,6 +215,13 @@ class EnqueueResponse(BaseModel):
     id: str
     status: str
     message: str
+    already_exists: bool = False
+
+
+class MaterialsBusyResponse(BaseModel):
+    queued: int = 0
+    processing: int = 0
+    total: int = 0
 
 
 class MaterialDeleteRequest(BaseModel):
@@ -239,3 +287,92 @@ class KeysCheckResponse(BaseModel):
     ok: int
     failed: int
     details: list[dict[str, Any]] = Field(default_factory=list)
+
+class ClientCreate(BaseModel):
+    display_name: str = Field(..., min_length=1, max_length=200)
+    aliases: list[str] = Field(default_factory=list)
+    contacts: dict[str, Any] = Field(default_factory=dict)
+    context_line: str | None = None
+    canon_facts: str | None = None
+    force: bool = False
+
+
+class ClientUpdate(BaseModel):
+    display_name: str | None = None
+    aliases: list[str] | None = None
+    contacts: dict[str, Any] | None = None
+    context_line: str | None = None
+    canon_facts: str | None = None
+
+
+class ClientMessageOut(BaseModel):
+    id: str
+    body: str
+    source: str
+    speaker: str = "unknown"
+    speaker_name: str | None = None
+    kind: str = "text"
+    event_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class ClientOut(BaseModel):
+    id: str
+    display_name: str
+    aliases: list[Any] = Field(default_factory=list)
+    contacts: dict[str, Any] = Field(default_factory=dict)
+    context_line: str | None = None
+    canon_facts: str | None = None
+    summary: str | None = None
+    summary_version: int = 0
+    summary_updated_at: datetime | None = None
+    summary_up_to_message_id: str | None = None
+    summary_stale: bool = False
+    messages_since_summary: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    message_count: int = 0
+
+
+class ClientDetail(ClientOut):
+    messages: list[ClientMessageOut] = Field(default_factory=list)
+
+
+class ClientMessageCreate(BaseModel):
+    body: str = Field(..., min_length=1)
+    refresh_summary: bool = False
+    source: str = "web"
+    speaker: str = "unknown"
+    speaker_name: str | None = None
+    kind: str = "text"
+
+
+class ClientMessageUpdate(BaseModel):
+    body: str = Field(..., min_length=1)
+
+
+class PastePreviewRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
+class PasteCommitRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+    speaker_roles: dict[str, str] = Field(default_factory=dict)
+    source: str = "web"
+
+
+class ClientMergeRequest(BaseModel):
+    from_id: str
+    into_id: str
+
+
+class MaterialClientLinkCreate(BaseModel):
+    material_id: str
+    relation: str | None = None
+
+
+class ClientContextResponse(BaseModel):
+    client: dict[str, Any]
+    recent_messages: list[dict[str, Any]] = Field(default_factory=list)
+    search_hits: list[dict[str, Any]] = Field(default_factory=list)
+    linked_materials: list[dict[str, Any]] = Field(default_factory=list)

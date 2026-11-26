@@ -1,4 +1,5 @@
 from typing import Any
+import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -217,6 +218,45 @@ class KnowledgeCard(BaseModel):
                 # leave as-is; summary will carry context
                 pass
 
+    def _is_shallow_promo_listicle(self) -> bool:
+        """Many named items, little procedure — promo / resource dump, not a playbook."""
+        tools = [t for t in (self.tools or []) if (t or "").strip()]
+        dig = (self.digest or "").strip()
+        dig_lines = [ln for ln in dig.splitlines() if ln.strip()]
+        blob = " ".join(
+            [
+                self.title or "",
+                self.summary or "",
+                self.main_idea or "",
+                dig,
+                " ".join(tools),
+                " ".join(self.practical_takeaways or []),
+            ]
+        ).lower()
+        name_hits = len(tools)
+        # Named projects / brands without step-by-step how-to
+        procedural = bool(
+            re.search(
+                r"\b(шаг\s*\d|how\s+to|установи|настрой|скопируй|запусти|создай|добавь\s+в)\b",
+                blob,
+                re.I,
+            )
+        )
+        listicle_voice = bool(
+            re.search(
+                r"\b(\d+\s*(проект|tool|инструмент|репо|repo)|топ\s*\d|listicle|подборк)\b",
+                blob,
+                re.I,
+            )
+        )
+        if name_hits >= 3 and not procedural:
+            return True
+        if listicle_voice and name_hits >= 2 and self.usefulness_signals.actionability <= 3:
+            return True
+        if len(dig_lines) >= 3 and name_hits >= 2 and not procedural and self.usefulness_signals.actionability <= 3:
+            return True
+        return False
+
     def _calibrate_usefulness(self) -> None:
         s = self.usefulness_signals
         # Base quality from 4 signals (personal_fit applied after)
@@ -241,6 +281,10 @@ class KnowledgeCard(BaseModel):
         if score_i >= 10 and min(s.actionability, s.reuse_likelihood, s.specificity) < 5:
             score_i = 9
 
+        # Promo / shallow listicle (names + CTA, no playbook) → ≤7 (target 6–7)
+        if self._is_shallow_promo_listicle():
+            score_i = min(score_i, 7)
+
         # Personal fit delta: (fit-3)*2.5 → -5..+5
         fit = int(s.personal_fit)
         delta = int(round((fit - 3) * 2.5))
@@ -254,6 +298,32 @@ class KnowledgeCard(BaseModel):
             score_i = min(score_i, 3)
         if fit >= 5 and s.actionability >= 4:
             score_i = max(score_i, 7)
+
+        # Re-apply listicle cap after fit bump so promo dumps don't hit 8–9
+        if self._is_shallow_promo_listicle():
+            score_i = min(score_i, 7)
+
+        # Tip claims download / open-source / GitHub but no verified links → never 8–10
+        claim_blob = " ".join(
+            [
+                self.title or "",
+                self.summary or "",
+                self.digest or "",
+                " ".join(self.practical_takeaways or []),
+            ]
+        ).lower()
+        claims_actionable_fetch = bool(
+            re.search(
+                r"("
+                r"github|гитхаб|скача|сканер|open[- ]?source|опенсорс|"
+                r"открыт\w*\s+код|репозитор|install|установи"
+                r")",
+                claim_blob,
+                re.I,
+            )
+        )
+        if claims_actionable_fetch and not (self.links or []):
+            score_i = min(score_i, 7)
 
         self.usefulness_score = max(1, min(10, score_i))
 

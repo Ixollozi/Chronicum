@@ -502,7 +502,10 @@ export default function GraphPage() {
         {empty ? (
           <div className="flex h-full flex-col items-center justify-center px-6 text-center">
             <p style={{ fontFamily: "var(--font-display)" }} className="text-3xl">
-              Сеть пуста
+              Карта пуста
+            </p>
+            <p className="mt-3 max-w-sm text-sm text-white/50">
+              Карта архива по тегам, категориям и общим инструментам. Сохраните материалы — появятся узлы.
             </p>
             <Link href="/" className="mt-6 text-[var(--accent)] hover:underline">
               На главную →
@@ -555,12 +558,15 @@ export default function GraphPage() {
               }
               if (hoverSet && lit) return "rgba(255,255,255,0.55)";
               if (l.reason === "belongs") return "rgba(255,255,255,0.2)";
+              if (l.reason === "tool") return "rgba(120, 200, 255, 0.28)";
+              if (l.reason === "link") return "rgba(160, 255, 180, 0.22)";
               return "rgba(255,255,255,0.1)";
             }}
             linkWidth={(l: GLink) => {
               const [a, b] = linkEnds(l);
               if (hoverSet && hoverSet.has(a) && hoverSet.has(b)) return 1.3;
               if (l.reason === "shared_tool" || l.reason === "semantic") return 0.9;
+              if (l.reason === "tool" || l.reason === "link") return 0.7;
               return l.reason === "belongs" ? 0.8 : 0.4;
             }}
             onNodeHover={(n: GNode | null) => {
@@ -657,6 +663,9 @@ export default function GraphPage() {
 
       <div className="pointer-events-none absolute inset-x-0 top-0 z-20 p-3 pt-[max(0.75rem,env(safe-area-inset-top))] md:p-4 md:pt-4 md:pr-52">
         <div className="pointer-events-auto flex max-w-md flex-col gap-2">
+          <p className="px-1 text-[11px] leading-snug text-white/45">
+            Карта архива по тегам и материалам · общие инструменты / ссылки — отдельные связи
+          </p>
           <div ref={searchWrapRef} className="relative">
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/55 px-3 py-1.5 backdrop-blur-md">
               <input
@@ -727,7 +736,7 @@ export default function GraphPage() {
                     value={category}
                     onChange={setCategory}
                     onSeekGlobal={focusSearch}
-                    seekGlobalLabel="Искать в сети"
+                    seekGlobalLabel="Искать на карте"
                     options={[
                       { value: "", label: "Все" },
                       ...categories.map((c) => ({ value: c, label: c })),
@@ -742,7 +751,7 @@ export default function GraphPage() {
                     value={tag}
                     onChange={setTag}
                     onSeekGlobal={focusSearch}
-                    seekGlobalLabel="Искать в сети"
+                    seekGlobalLabel="Искать на карте"
                     options={[
                       { value: "", label: "Все" },
                       ...tags.map((t) => ({ value: t, label: t })),
@@ -906,6 +915,9 @@ export default function GraphPage() {
                   >
                     Открыть материал
                   </button>
+                  <p className="mt-2 text-center text-[11px] text-white/40">
+                    Двойной клик по узлу тоже открывает карточку
+                  </p>
                 </>
               ) : (
                 <>

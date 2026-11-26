@@ -1,0 +1,12 @@
+[0:00] Три крутых open source проекта на GitHub.
+[0:05] Первый — Rybit, аналитика для сайтов, rybbit-io/rybbit.
+[0:18] Второй — BoardUI, доски и компоненты, BoardUI/boardui.
+[0:32] Третий — Vitter, утилита для Windows, pranshuparmar/witr.
+[0:48] Подписывайся на наш ТГ и канал GitHub Radar.
+
+[On-screen OCR timed]
+[OCR 0:06] rybbit-io/rybbit Analytics for your product
+[OCR 0:19] BoardUI/boardui Component library
+[OCR 0:33] pranshuparmar/witr Windows tool
+[OCR 0:42] 87% 64% 91% 55% 78%
+[OCR 0:50] Подпишись на ТГ githubradar

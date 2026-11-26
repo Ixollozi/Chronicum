@@ -1,0 +1,9 @@
+[0:00] Сегодня разберём SEO Monster внутри ассистента.
+[0:05] Подключи Search Console и PageSpeed через MCP.
+[0:20] Репозиторий на GitHub — ставь и пользуйся.
+[0:40] Напиши ПРОМПТ в комментариях и забери бортовой журнал.
+
+[On-screen OCR timed]
+[OCR 0:10] SEO Monster Search Console
+[OCR 0:15] github.com/avansaber/seo-monster
+[OCR 0:30] YOUR ASSISTANT Run SEO
