@@ -6,17 +6,22 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import router as api_router
 from app.config import get_settings
-from app.logging_setup import setup_logging
+from app.logging_setup import get_logger, setup_logging
 from app.mcp_http import build_mcp_asgi, mcp_http_enabled
 
 settings = get_settings()
 setup_logging(settings.log_level)
+log = get_logger(__name__)
 _mcp_server, _mcp_asgi = build_mcp_asgi()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    if settings.is_lite:
+    current = get_settings()
+    current.validate_security_posture()
+    for warning in current.security_warnings():
+        log.warning("security_posture_warning", detail=warning)
+    if current.is_lite:
         from app.db import init_lite_db
         from app.services.queue import recover_lite_queue
 
@@ -30,7 +35,7 @@ async def lifespan(_app: FastAPI):
         else:
             yield
     finally:
-        if settings.is_lite:
+        if current.is_lite:
             from app.services.queue import shutdown_lite_queue
 
             await shutdown_lite_queue()

@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { EB_Garamond, Figtree } from "next/font/google";
 import "./globals.css";
 import { AppShell } from "@/components/AppShell";
+import { PwaRegister } from "@/components/PwaRegister";
 
 const garamond = EB_Garamond({
   subsets: ["latin", "cyrillic"],
@@ -40,6 +41,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="ru">
       <body className={`${garamond.variable} ${figtree.variable} antialiased`}>
+        <PwaRegister />
         <AppShell>{children}</AppShell>
       </body>
     </html>

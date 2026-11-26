@@ -9,8 +9,14 @@ import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from app.config import get_settings
 from app.logging_setup import get_logger
-from app.services.media import extract_frame_at, probe_duration_seconds, score_frame_file
+from app.services.media import (
+    detect_scene_timestamps,
+    extract_frame_at,
+    probe_duration_seconds,
+    score_frame_file,
+)
 
 log = get_logger(__name__)
 
@@ -193,6 +199,33 @@ def merge_speech_with_ocr(raw_text: str | None, frames: list[AtlasFrame]) -> str
     return speech or block or ""
 
 
+def merge_atlas_timestamps(
+    grid_ts: list[float],
+    scene_ts: list[float],
+    *,
+    min_gap: float = 1.4,
+    max_total: int = 48,
+) -> list[float]:
+    """
+    Merge scene-change timestamps (priority for UI transitions) with baseline interval grid.
+    Deduplicates timestamps closer than `min_gap` and keeps total bounded at `max_total`.
+    """
+    chosen: list[float] = []
+    # Scene cuts first so exact slide/UI transitions win over arbitrary grid ticks
+    for t in sorted(scene_ts):
+        if len(chosen) >= max_total:
+            break
+        if all(abs(t - c) >= min_gap for c in chosen):
+            chosen.append(round(float(t), 2))
+    for t in sorted(grid_ts):
+        if len(chosen) >= max_total:
+            break
+        if all(abs(t - c) >= min_gap for c in chosen):
+            chosen.append(round(float(t), 2))
+    chosen.sort()
+    return chosen
+
+
 async def build_screen_atlas(
     video_path: str,
     out_dir: str | Path,
@@ -200,11 +233,29 @@ async def build_screen_atlas(
     duration: float | None = None,
     source_type: str = "video",
     keep_top_n: int = 24,
+    scene_detect: bool | None = None,
+    ocr_concurrency: int | None = None,
 ) -> list[AtlasFrame]:
-    """Sample video, OCR frames, keep top-N OCR-rich stills + full text list."""
+    """Sample video (grid + scene cuts), OCR frames concurrently, keep top-N OCR-rich stills."""
     vpath = str(video_path)
     if not Path(vpath).exists():
         return []
+
+    settings = get_settings()
+    use_scene = (
+        bool(getattr(settings, "atlas_scene_detect", True))
+        if scene_detect is None
+        else bool(scene_detect)
+    )
+    scene_threshold = float(getattr(settings, "atlas_scene_threshold", 0.28) or 0.28)
+    concurrency = max(
+        1,
+        int(
+            ocr_concurrency
+            if ocr_concurrency is not None
+            else (getattr(settings, "ocr_concurrency", 3) or 3)
+        ),
+    )
 
     dur = float(duration or 0) or await probe_duration_seconds(vpath)
     every, max_frames = atlas_sampling(duration=dur, source_type=source_type)
@@ -213,39 +264,68 @@ async def build_screen_atlas(
         shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True, exist_ok=True)
 
-    timestamps: list[float] = []
+    grid_ts: list[float] = []
     if dur <= 0:
-        timestamps = [0.5, 2.0, 4.0, 6.0, 8.0]
+        grid_ts = [0.5, 2.0, 4.0, 6.0, 8.0]
     else:
         t = min(0.4, max(0.15, dur * 0.02))
-        while t < max(0.0, dur - 0.25) and len(timestamps) < max_frames:
-            timestamps.append(round(t, 2))
+        while t < max(0.0, dur - 0.25) and len(grid_ts) < max_frames:
+            grid_ts.append(round(t, 2))
             t += every
 
-    ranked: list[AtlasFrame] = []
-    for i, t in enumerate(timestamps):
-        fname = f"frame_{i:04d}_t{int(t)}.jpg"
-        fpath = str(out / fname)
-        ok = await extract_frame_at(vpath, t, fpath)
-        if not ok:
-            continue
-        text = await asyncio.to_thread(_ocr_image, fpath)
-        score = await asyncio.to_thread(score_frame_file, fpath)
-        from app.services.local_ocr import ocr_sanitize
+    scene_ts: list[float] = []
+    if use_scene and dur > 6.0:
+        try:
+            scene_ts = await detect_scene_timestamps(
+                vpath,
+                threshold=scene_threshold,
+                max_scenes=max(12, max_frames // 2),
+                min_gap=max(1.2, min(2.0, every * 0.5)),
+                duration=dur,
+            )
+        except Exception as exc:
+            log.warning("atlas_scene_detect_failed", error=str(exc)[:200])
+            scene_ts = []
 
-        text = ocr_sanitize(text)
-        if text:
-            # Prefer readable text density
-            score += min(120.0, len(text) * 0.9 + len(re.findall(r"[A-Za-zА-Яа-яЁё0-9]{2,}", text)) * 5.0)
-        else:
-            score *= 0.15
-        if score < 8 and len(text) < 4:
-            try:
-                Path(fpath).unlink(missing_ok=True)
-            except Exception:
-                pass
-            continue
-        ranked.append(AtlasFrame(t_sec=float(t), text=text, score=float(score), path=fpath))
+    timestamps = merge_atlas_timestamps(
+        grid_ts,
+        scene_ts,
+        min_gap=max(1.0, min(1.5, every * 0.5)),
+        max_total=max(max_frames, len(grid_ts) + min(12, len(scene_ts))),
+    )
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _process_one(idx: int, t_val: float) -> AtlasFrame | None:
+        async with sem:
+            fname = f"frame_{idx:04d}_t{int(t_val)}.jpg"
+            fpath = str(out / fname)
+            ok = await extract_frame_at(vpath, t_val, fpath)
+            if not ok:
+                return None
+            raw_ocr = await asyncio.to_thread(_ocr_image, fpath)
+            score = await asyncio.to_thread(score_frame_file, fpath, ocr_text=raw_ocr)
+            from app.services.local_ocr import ocr_sanitize
+
+            text = ocr_sanitize(raw_ocr)
+            if text:
+                score += min(
+                    120.0,
+                    len(text) * 0.9
+                    + len(re.findall(r"[A-Za-zА-Яа-яЁё0-9]{2,}", text)) * 5.0,
+                )
+            else:
+                score *= 0.15
+            if score < 8 and len(text) < 4:
+                try:
+                    Path(fpath).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return None
+            return AtlasFrame(t_sec=float(t_val), text=text, score=float(score), path=fpath)
+
+    results = await asyncio.gather(*(_process_one(i, t) for i, t in enumerate(timestamps)))
+    ranked = [fr for fr in results if fr is not None]
 
     # Dedupe near-identical OCR within 1.6s — keep higher score
     ranked.sort(key=lambda f: f.t_sec)
@@ -255,12 +335,10 @@ async def build_screen_atlas(
             continue
         if kept and abs(fr.t_sec - kept[-1].t_sec) < 1.6:
             prev = kept[-1]
-            # similar text?
             a = set(fr.tokens)
             b = set(prev.tokens)
             if a and b and len(a & b) / max(1, len(a | b)) > 0.72:
                 if fr.score > prev.score:
-                    # replace
                     try:
                         if prev.path:
                             Path(prev.path).unlink(missing_ok=True)
@@ -292,9 +370,11 @@ async def build_screen_atlas(
         "screen_atlas_built",
         frames=len(kept),
         with_files=sum(1 for f in kept if f.path),
+        scene_cuts=len(scene_ts),
         every=every,
         duration=dur,
         source_type=source_type,
+        concurrency=concurrency,
     )
     return kept
 

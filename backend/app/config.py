@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     whisper_max_file_mb: float = 20.0
     whisper_chunk_seconds: int = 600
     youtube_prefer_captions: bool = True
+    atlas_scene_detect: bool = True
+    atlas_scene_threshold: float = 0.28
+    ocr_concurrency: int = 3
+    embedding_provider: str = "auto"  # auto | google | local | off
+    google_embedding_model: str = "text-embedding-004"
     groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     google_ai_api_key: str = ""
     google_ai_model: str = "gemini-2.0-flash"
@@ -63,9 +68,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     allow_placeholder_secrets: bool = True
     web_api_token: str = "chronicum-dev-token"
+    # Optional dedicated Fernet secret for encrypting stored API keys (decoupled from WEB_API_TOKEN)
+    secrets_encryption_key: str = ""
+    # Allow ?token=... query parameter for browser <img>/<audio> requests; set false when hardened
+    allow_query_token: bool = True
+    # Explicit opt-in if TELEGRAM_OWNER_ID=0 should allow any user even when hardened
+    telegram_allow_public: bool = False
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
-    @field_validator("ai_provider", "transcribe_provider")
+    @field_validator("ai_provider", "transcribe_provider", "embedding_provider")
     @classmethod
     def normalize_provider(cls, v: str) -> str:
         return v.strip().lower()
@@ -115,6 +126,40 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 f"Missing real secrets (still placeholders): {', '.join(missing)}. "
                 "Copy .env.example → .env and fill them."
+            )
+
+    @property
+    def is_default_web_token(self) -> bool:
+        tok = (self.web_api_token or "").strip()
+        return not tok or tok in _PLACEHOLDERS or tok == "chronicum-dev-token"
+
+    def security_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        if self.is_default_web_token:
+            warnings.append(
+                "WEB_API_TOKEN is using the default/placeholder value — set a strong random token before non-localhost exposure."
+            )
+        if not (self.secrets_encryption_key or "").strip():
+            warnings.append(
+                "SECRETS_ENCRYPTION_KEY is unset (falling back to WEB_API_TOKEN) — set SECRETS_ENCRYPTION_KEY so rotating WEB_API_TOKEN does not invalidate stored API keys."
+            )
+        if self.allow_query_token:
+            warnings.append(
+                "ALLOW_QUERY_TOKEN=true accepts ?token= in URLs — set ALLOW_QUERY_TOKEN=false outside local dev to prevent token leakage in access logs."
+            )
+        if self.telegram_ready and not self.telegram_owner_id:
+            warnings.append(
+                "TELEGRAM_OWNER_ID=0 — set your Telegram user ID to restrict bot access."
+            )
+        return warnings
+
+    def validate_security_posture(self) -> None:
+        """Fail fast on insecure defaults when ALLOW_PLACEHOLDER_SECRETS=false."""
+        if self.allow_placeholder_secrets:
+            return
+        if self.is_default_web_token:
+            raise RuntimeError(
+                "ALLOW_PLACEHOLDER_SECRETS=false requires a non-default WEB_API_TOKEN."
             )
 
 

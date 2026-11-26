@@ -34,6 +34,8 @@ type SlideId =
   | "overview"
   | "ideas"
   | "takeaways"
+  | "code"
+  | "links"
   | "evaluation"
   | "opinion"
   | "explain"

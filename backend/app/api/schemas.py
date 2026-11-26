@@ -109,6 +109,8 @@ class GraphLink(BaseModel):
     target: str
     reason: str
     weight: int | None = None
+    label: str | None = None
+    similarity: float | None = None
 
 
 class GraphResponse(BaseModel):
@@ -123,6 +125,38 @@ class SearchRequest(BaseModel):
 class SearchResponse(BaseModel):
     answer: str
     sources: list[MaterialListItem]
+
+
+class SearchFeedbackCreate(BaseModel):
+    query: str = Field(..., min_length=1, max_length=2000)
+    answer: str | None = Field(default=None, max_length=12000)
+    source_ids: list[str] = Field(default_factory=list, max_length=30)
+    helpful: bool
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class SearchFeedbackOut(BaseModel):
+    id: int
+    query: str
+    helpful: bool
+    source_ids: list[str] = Field(default_factory=list)
+    comment: str | None = None
+    created_at: datetime | None = None
+
+
+class CookiesStatusOut(BaseModel):
+    configured: bool
+    source: str
+    path: str | None = None
+    browser: str | None = None
+    entries: int = 0
+    domains: list[str] = Field(default_factory=list)
+    platforms: dict[str, bool] = Field(default_factory=dict)
+    writable: bool = True
+
+
+class CookiesUpdate(BaseModel):
+    content: str = Field(..., min_length=1)
 
 
 class CategoryOut(BaseModel):

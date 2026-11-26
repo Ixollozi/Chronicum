@@ -18,6 +18,8 @@ from app.api.schemas import (
     CategoryOut,
     ComposerRequest,
     ComposerResponse,
+    CookiesStatusOut,
+    CookiesUpdate,
     EnqueueResponse,
     GraphResponse,
     KeysCheckResponse,
@@ -28,6 +30,8 @@ from app.api.schemas import (
     MaterialListResponse,
     NoteCreate,
     ScoreUpdate,
+    SearchFeedbackCreate,
+    SearchFeedbackOut,
     SearchRequest,
     SearchResponse,
     TagOut,
@@ -35,7 +39,15 @@ from app.api.schemas import (
     UrlCreate,
 )
 from app.db import get_session
-from app.models import Category, Material, MaterialTag, ProcessingStatus, Tag, TagStatus
+from app.models import (
+    Category,
+    Material,
+    MaterialTag,
+    ProcessingStatus,
+    SearchFeedback,
+    Tag,
+    TagStatus,
+)
 from app.search import answer_question
 from app.services.composer import run_composer
 from app.services.graph import build_graph
@@ -121,22 +133,33 @@ async def list_materials(
     status_filter: str | None = Query(default=None, alias="status"),
     category: str | None = None,
     tag: str | None = None,
+    source_type: str | None = None,
+    entry_kind: str | None = None,
+    min_score: int | None = Query(default=None, ge=1, le=10),
+    sort: str = Query(default="newest", pattern="^(newest|oldest|score_desc|score_asc)$"),
     limit: int = Query(default=40, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    stmt = (
-        select(Material)
-        .options(
-            selectinload(Material.category),
-            selectinload(Material.tags).selectinload(MaterialTag.tag),
-        )
-        .order_by(Material.created_at.desc())
+    stmt = select(Material).options(
+        selectinload(Material.category),
+        selectinload(Material.tags).selectinload(MaterialTag.tag),
     )
     count_stmt = select(func.count()).select_from(Material)
 
     if status_filter:
         stmt = stmt.where(Material.processing_status == status_filter)
         count_stmt = count_stmt.where(Material.processing_status == status_filter)
+    if source_type:
+        stmt = stmt.where(Material.source_type == source_type)
+        count_stmt = count_stmt.where(Material.source_type == source_type)
+    if entry_kind:
+        stmt = stmt.where(Material.entry_kind == entry_kind)
+        count_stmt = count_stmt.where(Material.entry_kind == entry_kind)
+    if min_score is not None:
+        stmt = stmt.where(Material.usefulness_score.is_not(None), Material.usefulness_score >= min_score)
+        count_stmt = count_stmt.where(
+            Material.usefulness_score.is_not(None), Material.usefulness_score >= min_score
+        )
     if category:
         stmt = stmt.join(Category).where(Category.name.ilike(category))
         count_stmt = count_stmt.join(Category).where(Category.name.ilike(category))
@@ -157,6 +180,15 @@ async def list_materials(
         )
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)
+
+    if sort == "oldest":
+        stmt = stmt.order_by(Material.created_at.asc())
+    elif sort == "score_desc":
+        stmt = stmt.order_by(Material.usefulness_score.desc().nullslast(), Material.created_at.desc())
+    elif sort == "score_asc":
+        stmt = stmt.order_by(Material.usefulness_score.asc().nullslast(), Material.created_at.desc())
+    else:
+        stmt = stmt.order_by(Material.created_at.desc())
 
     total = (await session.execute(count_stmt)).scalar_one()
     rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().unique().all()
@@ -369,6 +401,54 @@ async def search(body: SearchRequest, session: AsyncSession = Depends(get_sessio
     return SearchResponse(answer=answer, sources=items)
 
 
+@router.post("/search/feedback", response_model=SearchFeedbackOut)
+async def create_search_feedback(
+    body: SearchFeedbackCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    fb = SearchFeedback(
+        query=body.query.strip(),
+        answer=(body.answer or "").strip() or None,
+        source_ids=[s.strip() for s in body.source_ids if s and s.strip()][:30],
+        helpful=bool(body.helpful),
+        comment=(body.comment or "").strip() or None,
+    )
+    session.add(fb)
+    await session.commit()
+    await session.refresh(fb)
+    return SearchFeedbackOut(
+        id=fb.id,
+        query=fb.query,
+        helpful=fb.helpful,
+        source_ids=fb.source_ids or [],
+        comment=fb.comment,
+        created_at=fb.created_at,
+    )
+
+
+@router.get("/search/feedback", response_model=list[SearchFeedbackOut])
+async def list_search_feedback(
+    session: AsyncSession = Depends(get_session),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    rows = (
+        await session.execute(
+            select(SearchFeedback).order_by(SearchFeedback.created_at.desc(), SearchFeedback.id.desc()).limit(limit)
+        )
+    ).scalars().all()
+    return [
+        SearchFeedbackOut(
+            id=r.id,
+            query=r.query,
+            helpful=r.helpful,
+            source_ids=r.source_ids or [],
+            comment=r.comment,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+
+
 @router.post("/composer", response_model=ComposerResponse)
 async def composer(body: ComposerRequest, session: AsyncSession = Depends(get_session)):
     try:
@@ -496,6 +576,37 @@ async def get_settings_api(session: AsyncSession = Depends(get_session)):
 
     data = await get_app_settings(session)
     return AppSettingsOut(**data)
+
+
+@router.get("/settings/cookies", response_model=CookiesStatusOut)
+async def get_cookies_status():
+    from dataclasses import asdict
+
+    from app.services.cookies import inspect_cookies_file
+
+    return CookiesStatusOut(**asdict(inspect_cookies_file()))
+
+
+@router.post("/settings/cookies", response_model=CookiesStatusOut)
+async def upload_cookies_content(body: CookiesUpdate):
+    from dataclasses import asdict
+
+    from app.services.cookies import save_cookies_content
+
+    try:
+        info = save_cookies_content(body.content)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return CookiesStatusOut(**asdict(info))
+
+
+@router.delete("/settings/cookies", response_model=CookiesStatusOut)
+async def clear_cookies_content():
+    from dataclasses import asdict
+
+    from app.services.cookies import delete_cookies_file
+
+    return CookiesStatusOut(**asdict(delete_cookies_file()))
 
 
 @router.patch("/settings", response_model=AppSettingsOut)

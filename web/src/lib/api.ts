@@ -158,7 +158,34 @@ export type GraphPayload = {
     summary?: string | null;
     degree: number;
   }[];
-  links: { source: string; target: string; reason: string; weight?: number }[];
+  links: {
+    source: string;
+    target: string;
+    reason: string;
+    weight?: number;
+    label?: string | null;
+    similarity?: number | null;
+  }[];
+};
+
+export type SearchFeedbackOut = {
+  id: number;
+  query: string;
+  helpful: boolean;
+  source_ids: string[];
+  comment: string | null;
+  created_at: string | null;
+};
+
+export type CookiesStatus = {
+  configured: boolean;
+  source: "env" | "managed" | "browser" | "none" | string;
+  path: string | null;
+  browser: string | null;
+  entries: number;
+  domains: string[];
+  platforms: Record<string, boolean>;
+  writable: boolean;
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -221,6 +248,17 @@ export const client = {
       method: "POST",
       body: JSON.stringify({ query }),
     }),
+  sendSearchFeedback: (payload: {
+    query: string;
+    answer?: string | null;
+    source_ids?: string[];
+    helpful: boolean;
+    comment?: string;
+  }) =>
+    api<SearchFeedbackOut>("/api/search/feedback", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   composer: (text: string, mode: ComposerMode = "auto") =>
     api<ComposerResult>("/api/composer", {
       method: "POST",
@@ -269,6 +307,14 @@ export const client = {
   rejectTag: (id: number) =>
     api<TagItem>(`/api/tags/${id}/reject`, { method: "POST" }),
   getSettings: () => api<AppSettings>("/api/settings"),
+  getCookiesStatus: () => api<CookiesStatus>("/api/settings/cookies"),
+  uploadCookies: (content: string) =>
+    api<CookiesStatus>("/api/settings/cookies", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
+  deleteCookies: () =>
+    api<CookiesStatus>("/api/settings/cookies", { method: "DELETE" }),
   health: () =>
     api<{
       status: string;

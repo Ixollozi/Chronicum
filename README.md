@@ -54,18 +54,19 @@ docker compose up --build -d
 
 ## Веб-страницы
 
-- `/` — спросить базу / сохранить ссылку, задачу, правило или заметку
-- `/archive` — каталог с фильтрами и поиском (учитывает словоформы русского и английского языков)
-- `/graph` — сеть материалов, тегов и категорий
-- `/m/[id]` — карточка материала (выжимка, объяснение, оценка, ключевые моменты)
-- `/settings` — режимы разбора, личный контекст, пул API-ключей (Groq + Gemini), **модерация предложенных тегов**, подключение MCP к IDE
+- `/` — спросить базу / сохранить ссылку, задачу, правило или заметку; оценка качества ответа («Полезно / Мимо»)
+- `/archive` — каталог с расширенными фильтрами (статус, категория, источник, тип записи, минимальный score, тег, сортировка) и гибридным поиском
+- `/graph` — сеть материалов, тегов и категорий + прямые связи между материалами (по смыслу и общим инструментам)
+- `/m/[id]` — карточка материала (выжимка, объяснение, оценка, ключевые моменты, код, ссылки, озвучка)
+- `/settings` — режимы разбора, **cookies для Instagram / TikTok / YouTube**, личный контекст, пул API-ключей (Groq + Gemini), **модерация предложенных тегов**, подключение MCP к IDE
+- **PWA** — веб-кабинет включает `site.webmanifest` и service worker (`/sw.js`) для установки на рабочий стол/телефон и оффлайн-оболочки
 
 ## Bot commands
 
 | Команда | Действие |
 |---|---|
 | ссылка / файл / voice / текст | В очередь |
-| вопрос | NL-поиск (использует пул ключей Groq → Gemini) |
+| вопрос | NL-поиск (гибридный lexical + semantic, пул ключей Groq → Gemini) |
 | `/retry <id>` | Повтор обработки |
 | `/process_full <id>` | Полный разбор длинного видео |
 | `/score <id> <1-10>` | Ручная оценка полезности |
@@ -75,8 +76,9 @@ docker compose up --build -d
 
 - **YouTube captions first-pass (`YOUTUBE_PREFER_CAPTIONS=true`):** для YouTube сначала забираются ручные или автоматические субтитры без скачивания видео и без расхода квоты Whisper. Если субтитров нет или они слишком короткие — автоматически включается fallback на скачивание + Whisper.
 - **Чанкинг длинного аудио (`WHISPER_MAX_FILE_MB=20`, `WHISPER_CHUNK_SECONDS=600`):** аудио тяжелее 20 МБ автоматически режется через `ffmpeg` на части с учётом лимита Groq (25 МБ).
+- **Screen Atlas (`ATLAS_SCENE_DETECT=true`, `OCR_CONCURRENCY=3`):** совмещает равномерную сетку с детекцией смен сцен через `ffmpeg` (`gt(scene, T)`) и параллельным OCR-скорингом без двойного прогона Tesseract.
 - **Режим превью:** по умолчанию обрабатывается **ролик целиком** (Настройки → Режимы → «Видео целиком»). Если выключить тоггл, длинные видео (> `VIDEO_PREVIEW_THRESHOLD_MIN`, по умолчанию 10 мин) сначала разбираются в preview-режиме (~`VIDEO_PREVIEW_FRACTION`, 20%) с авто-апгрейдом при высокой оценке или по кнопке `/process_full`.
-- **Instagram / TikTok cookies:** при rate-limit укажи `MEDIA_COOKIES_FILE` (Netscape `cookies.txt`) или `MEDIA_COOKIES_FROM_BROWSER=chrome`.
+- **Instagram / TikTok cookies:** при rate-limit загрузи Netscape `cookies.txt` прямо в **Настройки → Режимы → Cookies** (сохраняется локально с правами `0600`) либо задай `MEDIA_COOKIES_FILE` / `MEDIA_COOKIES_FROM_BROWSER=chrome`.
 
 ## Модерация тегов
 
@@ -86,9 +88,9 @@ docker compose up --build -d
 
 См. полный список с комментариями в [`.env.example`](.env.example). Основные группы:
 
-- AI и транскрибация: `GROQ_API_KEY`, `GOOGLE_AI_API_KEY`, `GROQ_LLM_MODEL`, `GROQ_WHISPER_MODEL`, `WHISPER_LANGUAGE`, `WHISPER_MAX_FILE_MB`, `WHISPER_CHUNK_SECONDS`, `YOUTUBE_PREFER_CAPTIONS`.
-- Медиа и OCR: `MEDIA_COOKIES_FILE`, `MEDIA_COOKIES_FROM_BROWSER`, `TESSERACT_CMD`, `VIDEO_CONCURRENCY`.
-- Безопасность: `WEB_API_TOKEN`, `NEXT_PUBLIC_WEB_API_TOKEN`, `CORS_ORIGINS`, `ALLOW_PLACEHOLDER_SECRETS=false` для не-dev окружений.
+- AI, поиск и транскрибация: `GROQ_API_KEY`, `GOOGLE_AI_API_KEY`, `GROQ_LLM_MODEL`, `GROQ_WHISPER_MODEL`, `WHISPER_LANGUAGE`, `WHISPER_MAX_FILE_MB`, `WHISPER_CHUNK_SECONDS`, `YOUTUBE_PREFER_CAPTIONS`, `EMBEDDING_PROVIDER`, `GOOGLE_EMBEDDING_MODEL`.
+- Медиа и OCR: `MEDIA_COOKIES_FILE`, `MEDIA_COOKIES_FROM_BROWSER`, `TESSERACT_CMD`, `VIDEO_CONCURRENCY`, `ATLAS_SCENE_DETECT`, `ATLAS_SCENE_THRESHOLD`, `OCR_CONCURRENCY`.
+- Безопасность: `WEB_API_TOKEN`, `NEXT_PUBLIC_WEB_API_TOKEN`, `SECRETS_ENCRYPTION_KEY`, `ALLOW_QUERY_TOKEN`, `TELEGRAM_ALLOW_PUBLIC`, `CORS_ORIGINS`, `ALLOW_PLACEHOLDER_SECRETS=false` для не-dev окружений.
 - MCP stdio-клиент: `CHRONICUM_API_URL`, `CHRONICUM_TOKEN`.
 
 ## Backup

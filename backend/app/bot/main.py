@@ -25,18 +25,21 @@ log = get_logger(__name__)
 URL_RE = re.compile(r"https?://\S+", re.I)
 
 
-def _owner_ok(message: Message) -> bool:
+def _is_owner_user(user_id: int | None) -> bool:
     settings = get_settings()
     if not settings.telegram_owner_id:
-        return True
-    return bool(message.from_user and message.from_user.id == settings.telegram_owner_id)
+        if getattr(settings, "telegram_allow_public", False) or settings.allow_placeholder_secrets:
+            return True
+        return False
+    return bool(user_id and user_id == settings.telegram_owner_id)
+
+
+def _owner_ok(message: Message) -> bool:
+    return _is_owner_user(message.from_user.id if message.from_user else None)
 
 
 def _owner_cb(cb: CallbackQuery) -> bool:
-    settings = get_settings()
-    if not settings.telegram_owner_id:
-        return True
-    return bool(cb.from_user and cb.from_user.id == settings.telegram_owner_id)
+    return _is_owner_user(cb.from_user.id if cb.from_user else None)
 
 
 async def enqueue(material_id: str, force_full: bool = False) -> None:

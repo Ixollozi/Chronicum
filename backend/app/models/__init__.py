@@ -129,6 +129,8 @@ class Material(Base):
 
     # Postgres FTS only; unused on SQLite lite mode
     search_vector: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Hybrid semantic search + graph similarity vector: {"model": str, "dim": int, "vec": list[float]}
+    embedding: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     category: Mapped[Category | None] = relationship()
     tags: Mapped[list["MaterialTag"]] = relationship(back_populates="material", cascade="all, delete-orphan")
@@ -167,3 +169,15 @@ class AppSetting(Base):
 
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class SearchFeedback(Base):
+    __tablename__ = "search_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_ids: Mapped[list[str] | None] = mapped_column(JSON, default=list)
+    helpful: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
