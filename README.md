@@ -29,8 +29,8 @@ Full-режим (Postgres+Redis): `.\scripts\setup-local.ps1` + `.\scripts\start
 
 ## С телефона (та же Wi‑Fi)
 
-Слушай `0.0.0.0` (API `:8010`, Next `:3000`), открой firewall TCP **3000** / **8010**.  
-Для Google OAuth нужен хост `http://<LAN-IP>.nip.io` (сырой LAN IP Google не принимает).  
+Слушай `0.0.0.0` (API `:8000` или `:8010`, Next `:3000`), открой Windows Firewall TCP **3000** / **8000** (или **8010**).  
+Укажи `NEXT_PUBLIC_API_URL=http://<LAN-IP>:8000` в `web/.env.local`, добавь `http://<LAN-IP>:3000` в `CORS_ORIGINS` (`.env`) и войди по `WEB_API_TOKEN` (Bearer).  
 Подробно: [docs/LOCAL_LAN_PHONE.md](docs/LOCAL_LAN_PHONE.md).
 
 ## Запуск через Docker (опционально)
