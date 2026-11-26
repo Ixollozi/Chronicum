@@ -67,6 +67,9 @@ export default function HomePage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ComposerResult | null>(null);
+  const [lastQuery, setLastQuery] = useState<string>("");
+  const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
   const [graphNodes, setGraphNodes] = useState<GraphPayload["nodes"]>([]);
   const [showSuggest, setShowSuggest] = useState(false);
 
@@ -145,11 +148,13 @@ export default function HomePage() {
     setBusy(true);
     setError(null);
     setResult(null);
+    setFeedback(null);
     setShowSuggest(false);
     try {
       const res = await client.composer(value, mode);
       setResult(res);
       if (res.intent === "search" || res.intent === "refuse") {
+        setLastQuery(value);
         return;
       }
       if (res.material_id) {
@@ -186,6 +191,24 @@ export default function HomePage() {
   function openInNetwork(id: string) {
     setShowSuggest(false);
     router.push(`/graph?focus=${encodeURIComponent(id)}`);
+  }
+
+  async function submitFeedback(helpful: boolean) {
+    if (!result || !lastQuery || feedbackBusy) return;
+    setFeedbackBusy(true);
+    try {
+      await client.sendSearchFeedback({
+        query: lastQuery,
+        answer: result.answer,
+        source_ids: (result.sources || []).map((s) => s.id),
+        helpful,
+      });
+      setFeedback(helpful ? "up" : "down");
+    } catch {
+      /* non-fatal */
+    } finally {
+      setFeedbackBusy(false);
+    }
   }
 
   return (
@@ -227,6 +250,38 @@ export default function HomePage() {
             </button>
           </div>
           <div className="whitespace-pre-wrap leading-relaxed text-[var(--ink)]">{result.answer}</div>
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+            <span>Ответ помог?</span>
+            <button
+              type="button"
+              disabled={feedbackBusy}
+              onClick={() => submitFeedback(true)}
+              aria-pressed={feedback === "up"}
+              className={`rounded-full border px-3 py-1 transition ${
+                feedback === "up"
+                  ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
+                  : "border-[var(--line)] hover:border-[var(--accent)] hover:text-[var(--ink)]"
+              }`}
+            >
+              Полезно
+            </button>
+            <button
+              type="button"
+              disabled={feedbackBusy}
+              onClick={() => submitFeedback(false)}
+              aria-pressed={feedback === "down"}
+              className={`rounded-full border px-3 py-1 transition ${
+                feedback === "down"
+                  ? "border-[var(--warn)] text-[var(--warn)]"
+                  : "border-[var(--line)] hover:border-[var(--warn)] hover:text-[var(--ink)]"
+              }`}
+            >
+              Мимо
+            </button>
+            {feedback && (
+              <span className="text-[var(--accent)]">Спасибо, сохранено</span>
+            )}
+          </div>
           {result.sources?.length > 0 && (
             <ul className="mt-8 space-y-1 border-t border-[var(--line)] pt-5">
               <li className="mb-2 text-xs uppercase tracking-[0.18em] text-[var(--muted)]">Источники</li>

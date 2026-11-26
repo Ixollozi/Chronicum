@@ -6,6 +6,7 @@ import {
   getToken,
   type ApiKeyItem,
   type AppSettings,
+  type CookiesStatus,
   type PersonalProfile,
   type TagItem,
   type TagStatusValue,
@@ -191,6 +192,10 @@ export default function SettingsPage() {
   const [checkMsg, setCheckMsg] = useState<string | null>(null);
   const [profileSaved, setProfileSaved] = useState<string | null>(null);
   const [modeFlash, setModeFlash] = useState<string | null>(null);
+  const [cookiesStatus, setCookiesStatus] = useState<CookiesStatus | null>(null);
+  const [cookiesDraft, setCookiesDraft] = useState("");
+  const [cookiesBusy, setCookiesBusy] = useState(false);
+  const [cookiesFlash, setCookiesFlash] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [health, setHealth] = useState<{
     status: string;
@@ -238,6 +243,10 @@ export default function SettingsPage() {
   useEffect(() => {
     loadSettings().catch((e) => setError(e instanceof Error ? e.message : "Ошибка"));
     client
+      .getCookiesStatus()
+      .then(setCookiesStatus)
+      .catch(() => undefined);
+    client
       .listTags("pending")
       .then((list) => setPendingTagCount(list.length))
       .catch(() => undefined);
@@ -279,6 +288,40 @@ export default function SettingsPage() {
       window.setTimeout(() => setModeFlash(null), 1400);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось сохранить");
+    }
+  }
+
+  async function saveCookies(content: string) {
+    if (!content.trim() || cookiesBusy) return;
+    setCookiesBusy(true);
+    setError(null);
+    setCookiesFlash(null);
+    try {
+      const next = await client.uploadCookies(content);
+      setCookiesStatus(next);
+      setCookiesDraft("");
+      setCookiesFlash(`Сохранено (${next.entries} записей)`);
+      window.setTimeout(() => setCookiesFlash(null), 2600);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось сохранить cookies");
+    } finally {
+      setCookiesBusy(false);
+    }
+  }
+
+  async function clearCookies() {
+    if (cookiesBusy) return;
+    setCookiesBusy(true);
+    setError(null);
+    try {
+      const next = await client.deleteCookies();
+      setCookiesStatus(next);
+      setCookiesFlash("Cookies удалены");
+      window.setTimeout(() => setCookiesFlash(null), 2000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось удалить cookies");
+    } finally {
+      setCookiesBusy(false);
     }
   }
 
@@ -478,6 +521,93 @@ export default function SettingsPage() {
             >
               <span className="settings-switch-knob" />
             </button>
+          </div>
+
+          <div className="settings-info">
+            <p className="settings-kicker">Cookies (Instagram · TikTok · YouTube)</p>
+            <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+              <p className="settings-info-text">
+                {cookiesStatus?.configured ? (
+                  <>
+                    Подключено ({cookiesStatus.source === "env" ? "из .env" : cookiesStatus.source === "browser" ? `браузер ${cookiesStatus.browser}` : "загружен файл"}
+                    {cookiesStatus.entries > 0 ? ` · ${cookiesStatus.entries} записей` : ""})
+                  </>
+                ) : (
+                  "Не настроены — приватные Reels / TikTok могут требовать авторизацию"
+                )}
+              </p>
+              {cookiesFlash && <span className="settings-flash">{cookiesFlash}</span>}
+            </div>
+            {cookiesStatus && cookiesStatus.entries > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5 text-xs">
+                {(["instagram", "tiktok", "youtube"] as const).map((plat) => (
+                  <span
+                    key={plat}
+                    className={`rounded-full border px-2.5 py-0.5 ${
+                      cookiesStatus.platforms?.[plat]
+                        ? "border-[var(--accent)] text-[var(--accent)]"
+                        : "border-[var(--line)] text-[var(--muted)]"
+                    }`}
+                  >
+                    {plat}: {cookiesStatus.platforms?.[plat] ? "ok" : "нет"}
+                  </span>
+                ))}
+              </div>
+            )}
+            <p className="settings-field-help mt-2">
+              Экспортируй Netscape <code className="text-[var(--ink)]">cookies.txt</code> расширением «Get cookies.txt LOCALLY» и загрузи файл или вставь содержимое ниже.
+            </p>
+            {cookiesStatus?.writable !== false ? (
+              <div className="mt-3 space-y-2.5">
+                <textarea
+                  value={cookiesDraft}
+                  onChange={(e) => setCookiesDraft(e.target.value)}
+                  rows={3}
+                  placeholder="# Netscape HTTP Cookie File&#10;.instagram.com&#9;TRUE&#9;/&#9;TRUE&#9;…"
+                  className="settings-textarea font-mono text-xs"
+                  aria-label="Содержимое Netscape cookies.txt"
+                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={cookiesBusy || !cookiesDraft.trim()}
+                    onClick={() => saveCookies(cookiesDraft)}
+                    className="card-btn card-btn-accent"
+                  >
+                    {cookiesBusy ? "Сохраняю…" : "Сохранить cookies"}
+                  </button>
+                  <label className="card-btn cursor-pointer">
+                    Загрузить .txt
+                    <input
+                      type="file"
+                      accept=".txt,text/plain"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const f = e.target.files?.[0];
+                        e.target.value = "";
+                        if (!f) return;
+                        const text = await f.text();
+                        await saveCookies(text);
+                      }}
+                    />
+                  </label>
+                  {cookiesStatus?.source === "managed" && (
+                    <button
+                      type="button"
+                      disabled={cookiesBusy}
+                      onClick={clearCookies}
+                      className="card-btn card-btn-danger"
+                    >
+                      Удалить
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <p className="settings-field-help mt-2">
+                Сейчас используется <code className="text-[var(--ink)]">MEDIA_COOKIES_FILE</code> из окружения (управление файлом через сервер).
+              </p>
+            )}
           </div>
 
           <div className="settings-info">

@@ -288,7 +288,7 @@ async def extract_frame_at(video_path: str, t_sec: float, out_path: str) -> bool
     return False
 
 
-def score_frame_file(path: str) -> float:
+def score_frame_file(path: str, *, ocr_text: str | None = None) -> float:
     """Higher = more useful screenshot (detail + on-screen text)."""
     try:
         import cv2
@@ -311,9 +311,12 @@ def score_frame_file(path: str) -> float:
 
         text_bonus = 0.0
         try:
-            from app.services.local_ocr import ocr_image_file
+            raw_ocr = ocr_text
+            if raw_ocr is None:
+                from app.services.local_ocr import ocr_image_file
 
-            cleaned = re.sub(r"\s+", " ", (ocr_image_file(path) or "").strip())
+                raw_ocr = ocr_image_file(path)
+            cleaned = re.sub(r"\s+", " ", (raw_ocr or "").strip())
             words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]{2,}", cleaned)
             text_bonus = min(180.0, len(cleaned) * 0.8 + len(words) * 6.0)
         except Exception:
@@ -326,6 +329,59 @@ def score_frame_file(path: str) -> float:
             return float(Path(path).stat().st_size) / 5000.0
         except Exception:
             return 0.0
+
+
+_PTS_TIME_RE = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
+
+
+async def detect_scene_timestamps(
+    video_path: str,
+    *,
+    threshold: float = 0.28,
+    max_scenes: int = 36,
+    min_gap: float = 1.5,
+    duration: float = 0.0,
+) -> list[float]:
+    """
+    Detect visual scene/slide transitions via ffmpeg's `select='gt(scene,T)',showinfo`.
+    Returns sorted timestamps in seconds, downsampled across the timeline if needed.
+    """
+    if not Path(video_path).exists():
+        return []
+    thr = max(0.05, min(0.95, float(threshold)))
+    ff = ffmpeg_exe()
+    vf = f"select='gt(scene,{thr:.2f})',showinfo"
+    result = await run_cmd(
+        [ff, "-hide_banner", "-i", video_path, "-vf", vf, "-an", "-f", "null", "-"],
+        timeout=300,
+    )
+    if result.returncode != 0 and not result.stderr:
+        return []
+
+    raw_ts: list[float] = []
+    for m in _PTS_TIME_RE.finditer(result.stderr or ""):
+        try:
+            t = float(m.group(1))
+        except ValueError:
+            continue
+        if t <= 0.1:
+            continue
+        if duration > 0 and t >= max(0.0, duration - 0.2):
+            continue
+        if not raw_ts or (t - raw_ts[-1]) >= min_gap:
+            raw_ts.append(round(t, 2))
+
+    if len(raw_ts) <= max_scenes or max_scenes <= 0:
+        return raw_ts
+
+    # Uniformly downsample across full timeline so late UI transitions are kept
+    step = (len(raw_ts) - 1) / float(max(1, max_scenes - 1))
+    picked: list[float] = []
+    for idx in range(max_scenes):
+        t = raw_ts[min(len(raw_ts) - 1, int(round(idx * step)))]
+        if not picked or t > picked[-1]:
+            picked.append(t)
+    return picked
 
 
 async def extract_best_frame_near(

@@ -10,6 +10,12 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.logging_setup import get_logger
 from app.models import Category, Material, MaterialTag, ProcessingStatus, Tag
+from app.search.embeddings import (
+    LOCAL_EMBED_MODEL,
+    compute_embedding,
+    cosine_similarity,
+    material_vector_for_model,
+)
 from app.search.stemmer import (
     normalize_text,
     sql_like_variants,
@@ -191,13 +197,87 @@ async def _sqlite_search(session: AsyncSession, query: str, limit: int) -> list[
     return scored[:limit]
 
 
+async def _semantic_candidates(
+    session: AsyncSession,
+    query: str,
+    *,
+    limit: int = 24,
+    scan_limit: int = 400,
+) -> dict[str, tuple[Material, float]]:
+    """
+    Compute cosine similarity between the query embedding and recent DONE materials.
+    Returns `{material_id: (material, similarity)}` for candidates above a conservative floor.
+    """
+    settings = get_settings()
+    if (getattr(settings, "embedding_provider", "auto") or "auto").strip().lower() == "off":
+        return {}
+    q_emb = await compute_embedding(query, settings=settings)
+    if not q_emb or not q_emb.get("vec"):
+        return {}
+    q_model = str(q_emb["model"])
+    q_vec = q_emb["vec"]
+    min_sim = 0.24 if q_model == LOCAL_EMBED_MODEL else 0.42
+
+    result = await session.execute(
+        select(Material)
+        .options(
+            selectinload(Material.category),
+            selectinload(Material.tags).selectinload(MaterialTag.tag),
+        )
+        .where(Material.processing_status == ProcessingStatus.DONE.value)
+        .order_by(Material.created_at.desc())
+        .limit(scan_limit)
+    )
+    materials = list(result.scalars().unique().all())
+    scored: list[tuple[Material, float]] = []
+    for m in materials:
+        m_vec = material_vector_for_model(m, q_model)
+        if not m_vec:
+            continue
+        sim = cosine_similarity(q_vec, m_vec)
+        if sim >= min_sim:
+            scored.append((m, sim))
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+    return {m.id: (m, sim) for m, sim in scored[:limit]}
+
+
+async def _merge_hybrid_hits(
+    session: AsyncSession,
+    query: str,
+    lexical_hits: list[SearchHit],
+    limit: int,
+) -> list[SearchHit]:
+    sem_map = await _semantic_candidates(session, query, limit=max(limit * 3, 16))
+    if not sem_map:
+        return lexical_hits[:limit]
+
+    merged: dict[str, SearchHit] = {}
+    for hit in lexical_hits:
+        sim = sem_map.get(hit.material.id, (None, 0.0))[1]
+        merged[hit.material.id] = SearchHit(
+            material=hit.material,
+            rank=hit.rank + max(0.0, sim) * 2.4,
+        )
+
+    for mid, (mat, sim) in sem_map.items():
+        if mid in merged:
+            continue
+        # Semantic-only match (e.g. paraphrase, typo, shared subwords/concepts)
+        sem_rank = sim * 2.6 + (mat.usefulness_score or 0) * 0.03
+        merged[mid] = SearchHit(material=mat, rank=sem_rank)
+
+    ranked = sorted(merged.values(), key=lambda h: h.rank, reverse=True)
+    return ranked[:limit]
+
+
 async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[SearchHit]:
     q = query.strip()
     if not q:
         return []
 
     if get_settings().is_sqlite:
-        return await _sqlite_search(session, q, limit)
+        lexical = await _sqlite_search(session, q, max(limit * 2, 16))
+        return await _merge_hybrid_hits(session, q, lexical, limit)
 
     # Postgres: combine Russian morphological FTS + simple FTS (for exact EN/brand tokens)
     sql = text(
@@ -235,7 +315,7 @@ async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[
         """
     )
     try:
-        rows = (await session.execute(sql, {"q": q, "limit": limit})).all()
+        rows = (await session.execute(sql, {"q": q, "limit": max(limit * 2, 16)})).all()
     except Exception:
         rows = []
     ids = [r[0] for r in rows]
@@ -250,9 +330,11 @@ async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[
             .where(Material.id.in_(ids))
         )
         materials = {m.id: m for m in result.scalars().all()}
-        return [SearchHit(material=materials[i], rank=ranks[i]) for i in ids if i in materials]
+        lexical = [SearchHit(material=materials[i], rank=ranks[i]) for i in ids if i in materials]
+        return await _merge_hybrid_hits(session, q, lexical, limit)
 
-    return await _sqlite_search(session, q, limit)
+    lexical = await _sqlite_search(session, q, max(limit * 2, 16))
+    return await _merge_hybrid_hits(session, q, lexical, limit)
 
 
 def _format_sources_fallback(prefix: str, hits: list[SearchHit]) -> str:

@@ -290,7 +290,9 @@ async def fetch_youtube_captions(
     Returns None when no usable track is available so callers can fall back to Whisper.
     """
     settings = get_settings()
-    cookies = getattr(settings, "media_cookies_file", "") or ""
+    from app.services.cookies import resolve_cookies_file
+
+    cookies = resolve_cookies_file(settings)
     cookies_browser = getattr(settings, "media_cookies_from_browser", "") or ""
     return await asyncio.to_thread(
         _fetch_youtube_captions_sync,
@@ -537,7 +539,9 @@ async def download_media_bundle(url: str, *, label: str = "media") -> MediaBundl
     out_dir = ensure_storage() / label
     out_dir.mkdir(parents=True, exist_ok=True)
     settings = get_settings()
-    cookies = getattr(settings, "media_cookies_file", "") or ""
+    from app.services.cookies import resolve_cookies_file
+
+    cookies = resolve_cookies_file(settings)
     cookies_browser = getattr(settings, "media_cookies_from_browser", "") or ""
     is_ig = "instagram.com" in url.lower() or "instagr.am" in url.lower()
     is_tt = "tiktok.com" in url.lower()
@@ -573,8 +577,9 @@ async def download_media_bundle(url: str, *, label: str = "media") -> MediaBundl
                     log.exception("instagram_fallback_failed", error=str(e2)[:300])
                     raise RuntimeError(
                         "Не удалось скачать Instagram (видео или карусель). "
-                        "Варианты: MEDIA_COOKIES_FILE / MEDIA_COOKIES_FROM_BROWSER=chrome "
-                        "или загрузи файлом."
+                        "Загрузи cookies.txt в Настройках → Режимы → Cookies "
+                        "(или укажи MEDIA_COOKIES_FILE / MEDIA_COOKIES_FROM_BROWSER=chrome), "
+                        "либо загрузи файл вручную."
                     ) from e2
             if is_tt:
                 try:
@@ -584,13 +589,15 @@ async def download_media_bundle(url: str, *, label: str = "media") -> MediaBundl
                 except Exception as e2:
                     raise RuntimeError(
                         f"Не удалось скачать TikTok: {msg[:200]}. "
-                        "Нужны cookies (MEDIA_COOKIES_FILE / MEDIA_COOKIES_FROM_BROWSER=chrome) "
-                        "или загрузи файл вручную. Карусель /photo/ yt-dlp не качает — берём слайды с страницы."
+                        "Загрузи cookies.txt в Настройках → Режимы → Cookies "
+                        "(или укажи MEDIA_COOKIES_FILE / MEDIA_COOKIES_FROM_BROWSER=chrome), "
+                        "либо загрузи файл вручную. Карусель /photo/ yt-dlp не качает — берём слайды с страницы."
                     ) from e2
             if "login" in msg.lower() or "cookie" in msg.lower():
                 raise RuntimeError(
                     "Не удалось скачать медиа (нужны cookies). "
-                    "Укажи MEDIA_COOKIES_FILE в .env или загрузи файл вручную."
+                    "Загрузи cookies.txt в Настройках → Режимы → Cookies "
+                    "(или укажи MEDIA_COOKIES_FILE в .env), либо загрузи файл вручную."
                 ) from e
             raise RuntimeError(f"Не удалось скачать медиа: {msg[:300]}") from e
 

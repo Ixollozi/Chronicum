@@ -18,7 +18,29 @@ type GNode = GraphPayload["nodes"][number] & {
   fy?: number;
   val?: number;
 };
-type GLink = { source: string | GNode; target: string | GNode; reason: string; weight?: number };
+type GLink = {
+  source: string | GNode;
+  target: string | GNode;
+  reason: string;
+  weight?: number;
+  label?: string | null;
+  similarity?: number | null;
+};
+
+function isMaterialLink(reason: string): boolean {
+  return reason === "semantic" || reason === "shared_tool";
+}
+
+function linkReasonLabel(link: Pick<GLink, "reason" | "label" | "similarity">): string {
+  if (link.reason === "shared_tool") {
+    return link.label ? `Инструменты: ${link.label}` : "Общие инструменты";
+  }
+  if (link.reason === "semantic") {
+    const pct = link.similarity != null ? ` ${Math.round(link.similarity * 100)}%` : "";
+    return `По смыслу${pct}`;
+  }
+  return link.reason;
+}
 
 function linkEnds(l: GLink): [string, string] {
   const s = typeof l.source === "object" ? l.source.id : l.source;
@@ -91,6 +113,7 @@ export default function GraphPage() {
   const [category, setCategory] = useState("");
   const [tag, setTag] = useState("");
   const [minScore, setMinScore] = useState(0);
+  const [showSemanticLinks, setShowSemanticLinks] = useState(true);
   const [pointer, setPointer] = useState({ x: 0, y: 0 });
   const [forcesReady, setForcesReady] = useState(0);
   const [coarsePointer, setCoarsePointer] = useState(false);
@@ -106,6 +129,8 @@ export default function GraphPage() {
           target: typeof l.target === "string" ? l.target : String(l.target),
           reason: l.reason,
           weight: l.weight,
+          label: l.label ?? null,
+          similarity: l.similarity ?? null,
         })),
       });
       setError(null);
@@ -191,7 +216,14 @@ export default function GraphPage() {
       const b = nodeById.get(t);
       if (!a || !b) continue;
       if (a.type === "material" || b.type === "material") {
-        links.push({ source: s, target: t, reason: l.reason, weight: l.weight });
+        links.push({
+          source: s,
+          target: t,
+          reason: l.reason,
+          weight: l.weight,
+          label: l.label ?? null,
+          similarity: l.similarity ?? null,
+        });
         continue;
       }
       if (isTopic(a) && isTopic(b) && (l.reason === "belongs" || l.reason === "cooccur")) {
@@ -335,7 +367,7 @@ export default function GraphPage() {
     return set;
   }, [hover, adjacency, visibleIds]);
 
-  const neighborsOfSheet = useMemo(() => {
+    const neighborsOfSheet = useMemo(() => {
     if (!sheet || !raw) return [];
     const ids = adjacency.get(sheet.id) || new Set();
     const seen = new Set<string>();
@@ -349,6 +381,25 @@ export default function GraphPage() {
     }
     return out;
   }, [sheet, adjacency, raw]);
+
+  const relatedMaterialsOfSheet = useMemo(() => {
+    if (!sheet || !raw || sheet.type !== "material") return [];
+    const out: { node: GraphPayload["nodes"][number]; reason: string; badge: string }[] = [];
+    const seen = new Set<string>();
+    for (const l of raw.links) {
+      if (!isMaterialLink(l.reason)) continue;
+      const [s, t] = linkEnds(l as GLink);
+      const otherId = s === sheet.id ? t : t === sheet.id ? s : null;
+      if (!otherId) continue;
+      const key = `${otherId}:${l.reason}`;
+      if (seen.has(key)) continue;
+      const other = nodeById.get(otherId);
+      if (!other || other.type !== "material") continue;
+      seen.add(key);
+      out.push({ node: other, reason: l.reason, badge: linkReasonLabel(l) });
+    }
+    return out.slice(0, 8);
+  }, [sheet, raw, nodeById]);
 
   function zoomToFit() {
     fittedRef.current = true;
@@ -486,21 +537,30 @@ export default function GraphPage() {
               }
             }}
             linkVisibility={(l: GLink) => {
+              if (!showSemanticLinks && isMaterialLink(l.reason)) return false;
               const [a, b] = linkEnds(l);
               return visibleIds.has(a) && visibleIds.has(b);
             }}
             linkColor={(l: GLink) => {
               const [a, b] = linkEnds(l);
               if (!visibleIds.has(a) || !visibleIds.has(b)) return "rgba(0,0,0,0)";
+              if (!showSemanticLinks && isMaterialLink(l.reason)) return "rgba(0,0,0,0)";
               const lit = !hoverSet || (hoverSet.has(a) && hoverSet.has(b));
               if (hoverSet && !lit) return "rgba(255,255,255,0.03)";
+              if (l.reason === "semantic") {
+                return hoverSet && lit ? "rgba(110,231,183,0.8)" : "rgba(110,231,183,0.34)";
+              }
+              if (l.reason === "shared_tool") {
+                return hoverSet && lit ? "rgba(251,191,36,0.85)" : "rgba(251,191,36,0.38)";
+              }
               if (hoverSet && lit) return "rgba(255,255,255,0.55)";
               if (l.reason === "belongs") return "rgba(255,255,255,0.2)";
               return "rgba(255,255,255,0.1)";
             }}
             linkWidth={(l: GLink) => {
               const [a, b] = linkEnds(l);
-              if (hoverSet && hoverSet.has(a) && hoverSet.has(b)) return 1.2;
+              if (hoverSet && hoverSet.has(a) && hoverSet.has(b)) return 1.3;
+              if (l.reason === "shared_tool" || l.reason === "semantic") return 0.9;
               return l.reason === "belongs" ? 0.8 : 0.4;
             }}
             onNodeHover={(n: GNode | null) => {
@@ -712,6 +772,31 @@ export default function GraphPage() {
                     ))}
                   </div>
                 </label>
+                <label className="graph-filter-field graph-filter-field--score">
+                  <span className="graph-filter-label">Связи материалов</span>
+                  <div className="graph-score-seg" role="radiogroup" aria-label="Связи по смыслу и инструментам">
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={showSemanticLinks}
+                      className="graph-score-seg-item"
+                      data-active={showSemanticLinks}
+                      onClick={() => setShowSemanticLinks(true)}
+                    >
+                      Смысл + стеки
+                    </button>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={!showSemanticLinks}
+                      className="graph-score-seg-item"
+                      data-active={!showSemanticLinks}
+                      onClick={() => setShowSemanticLinks(false)}
+                    >
+                      Только темы
+                    </button>
+                  </div>
+                </label>
               </div>
               {activeFilters && (
                 <button
@@ -780,6 +865,39 @@ export default function GraphPage() {
                   </p>
                   {sheet.summary && (
                     <p className="mt-3 text-sm leading-relaxed text-white/80 line-clamp-6">{sheet.summary}</p>
+                  )}
+                  {relatedMaterialsOfSheet.length > 0 && (
+                    <div className="mt-4 border-t border-white/10 pt-3">
+                      <p className="text-[11px] uppercase tracking-[0.16em] text-white/45">
+                        Связанные материалы
+                      </p>
+                      <ul className="mt-2 space-y-1">
+                        {relatedMaterialsOfSheet.map(({ node, reason, badge }) => (
+                          <li key={`${node.id}:${reason}`}>
+                            <button
+                              type="button"
+                              className="flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-xs text-white/85 transition hover:bg-white/8 hover:text-white"
+                              onClick={() => {
+                                const target = graphData.nodes.find((x) => x.id === node.id);
+                                if (target) selectNode(target);
+                                else setSheet(node as GNode);
+                              }}
+                            >
+                              <span className="min-w-0 line-clamp-1">{node.title}</span>
+                              <span
+                                className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] ${
+                                  reason === "shared_tool"
+                                    ? "bg-amber-400/15 text-amber-300"
+                                    : "bg-emerald-400/15 text-emerald-300"
+                                }`}
+                              >
+                                {badge}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   )}
                   <button
                     type="button"

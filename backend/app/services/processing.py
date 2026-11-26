@@ -286,6 +286,15 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
         material.usage_meta = meta
 
         await _apply_card(session, material, llm.card, cat_map, tag_map)
+        try:
+            from app.search.embeddings import compute_embedding, material_embedding_text
+
+            emb_text = material_embedding_text(material)
+            emb = await compute_embedding(emb_text, settings=settings)
+            if emb is not None:
+                material.embedding = emb
+        except Exception as exc:
+            log.warning("material_embedding_failed", material_id=material_id, error=str(exc)[:200])
 
         if stage == ProcessingStage.PREVIEW.value:
             if llm.card.usefulness_score >= settings.video_full_score_threshold:

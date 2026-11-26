@@ -22,6 +22,41 @@ const STATUSES = [
   { value: "failed", label: "Ошибка" },
 ] as const;
 
+const SOURCE_TYPES = [
+  { value: "", label: "Все источники" },
+  { value: "youtube", label: "YouTube" },
+  { value: "instagram", label: "Instagram" },
+  { value: "tiktok", label: "TikTok" },
+  { value: "article", label: "Статья" },
+  { value: "note", label: "Заметка" },
+  { value: "pdf", label: "PDF" },
+  { value: "voice", label: "Голос" },
+  { value: "video", label: "Видео" },
+  { value: "image", label: "Фото" },
+] as const;
+
+const ENTRY_KINDS = [
+  { value: "", label: "Все типы" },
+  { value: "knowledge", label: "Знание" },
+  { value: "task", label: "Задача" },
+  { value: "rule", label: "Правило" },
+] as const;
+
+const MIN_SCORES = [
+  { value: "", label: "Любой score" },
+  { value: "5", label: "Score ≥ 5" },
+  { value: "7", label: "Score ≥ 7" },
+  { value: "8", label: "Score ≥ 8" },
+  { value: "9", label: "Score ≥ 9" },
+] as const;
+
+const SORT_OPTIONS = [
+  { value: "newest", label: "Сначала новые" },
+  { value: "oldest", label: "Сначала старые" },
+  { value: "score_desc", label: "Сначала высокий score" },
+  { value: "score_asc", label: "Сначала низкий score" },
+] as const;
+
 function materialsLabel(n: number): string {
   const mod10 = n % 10;
   const mod100 = n % 100;
@@ -44,7 +79,13 @@ export default function ArchivePage() {
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("");
   const [category, setCategory] = useState("");
+  const [sourceType, setSourceType] = useState("");
+  const [entryKind, setEntryKind] = useState("");
+  const [minScore, setMinScore] = useState("");
+  const [tag, setTag] = useState("");
+  const [sort, setSort] = useState("newest");
   const [categories, setCategories] = useState<{ id: number; name: string }[]>([]);
+  const [tags, setTags] = useState<{ id: number; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -63,6 +104,11 @@ export default function ArchivePage() {
           q: q || undefined,
           status: status || undefined,
           category: category || undefined,
+          tag: tag || undefined,
+          source_type: sourceType || undefined,
+          entry_kind: entryKind || undefined,
+          min_score: minScore ? Number(minScore) : undefined,
+          sort: sort || "newest",
           limit: 50,
         });
         setItems(data.items);
@@ -81,7 +127,7 @@ export default function ArchivePage() {
         if (!opts?.silent) setLoading(false);
       }
     },
-    [q, status, category]
+    [q, status, category, tag, sourceType, entryKind, minScore, sort]
   );
 
   useEffect(() => {
@@ -89,6 +135,10 @@ export default function ArchivePage() {
     client
       .categories()
       .then((c) => setCategories(cleanCategories(c)))
+      .catch(() => undefined);
+    client
+      .listTags("approved")
+      .then((t) => setTags(t))
       .catch(() => undefined);
   }, [load]);
 
@@ -119,7 +169,9 @@ export default function ArchivePage() {
     [items]
   );
 
-  const filtersActive = Boolean(q || status || category);
+  const filtersActive = Boolean(
+    q || status || category || tag || sourceType || entryKind || minScore || sort !== "newest"
+  );
   const showChecks = selectMode || selected.size > 0;
 
   function toggle(id: string) {
@@ -159,6 +211,11 @@ export default function ArchivePage() {
     setQ("");
     setStatus("");
     setCategory("");
+    setTag("");
+    setSourceType("");
+    setEntryKind("");
+    setMinScore("");
+    setSort("newest");
   }
 
   const itemsRef = useRef(items);
@@ -290,7 +347,7 @@ export default function ArchivePage() {
                 </button>
               ))}
             </div>
-            <div className="archive-filters-row">
+            <div className="archive-filters-row flex-wrap">
               <FancySelect
                 aria-label="Категория"
                 variant="archive"
@@ -300,6 +357,46 @@ export default function ArchivePage() {
                   { value: "", label: "Все категории" },
                   ...categories.map((c) => ({ value: c.name, label: c.name })),
                 ]}
+              />
+              <FancySelect
+                aria-label="Источник"
+                variant="archive"
+                value={sourceType}
+                onChange={setSourceType}
+                options={SOURCE_TYPES.map((o) => ({ value: o.value, label: o.label }))}
+              />
+              <FancySelect
+                aria-label="Тип записи"
+                variant="archive"
+                value={entryKind}
+                onChange={setEntryKind}
+                options={ENTRY_KINDS.map((o) => ({ value: o.value, label: o.label }))}
+              />
+              <FancySelect
+                aria-label="Оценка"
+                variant="archive"
+                value={minScore}
+                onChange={setMinScore}
+                options={MIN_SCORES.map((o) => ({ value: o.value, label: o.label }))}
+              />
+              {tags.length > 0 && (
+                <FancySelect
+                  aria-label="Тег"
+                  variant="archive"
+                  value={tag}
+                  onChange={setTag}
+                  options={[
+                    { value: "", label: "Все теги" },
+                    ...tags.map((t) => ({ value: t.name, label: `#${t.name}` })),
+                  ]}
+                />
+              )}
+              <FancySelect
+                aria-label="Сортировка"
+                variant="archive"
+                value={sort}
+                onChange={setSort}
+                options={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
               />
               {filtersActive && (
                 <button

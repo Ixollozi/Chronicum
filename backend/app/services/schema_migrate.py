@@ -16,6 +16,7 @@ MATERIAL_EXTRA_COLUMNS: dict[str, str] = {
     "key_moments": "JSON",
     "code_blocks": "JSON",
     "entry_kind": "TEXT DEFAULT 'knowledge'",
+    "embedding": "JSON",
 }
 
 
