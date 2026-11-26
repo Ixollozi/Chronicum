@@ -67,6 +67,154 @@ async def ocr_frames(paths: list[str]) -> str:
     return await asyncio.to_thread(_ocr)
 
 
+_VIDEO_FILE_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".m4v", ".avi"}
+
+
+async def _extract_audio_safe(video_path: str) -> str:
+    p = Path(video_path)
+    if p.suffix.lower() == ".mp3":
+        return video_path
+    audio_path = str(p.with_suffix(".mp3"))
+    try:
+        return await extract_audio(video_path, audio_path)
+    except Exception:
+        return video_path
+
+
+async def _extract_video_pipeline(
+    *,
+    video_paths: list[str],
+    title: str | None,
+    duration: float | None,
+    source_type: str,
+    stage: str,
+    settings: Settings,
+    atlas_dir: str | None,
+    session,
+    extra_block: str = "",
+) -> tuple[str, str | None, float | None, float, str | None]:
+    from app.services.localize import localize_transcript_to_russian
+
+    if not video_paths:
+        return extra_block or (title or ""), title, None, 0.0, None
+
+    if len(video_paths) == 1:
+        dur = float(duration) if duration and duration > 0 else await probe_duration_seconds(video_paths[0])
+        per_durations = [dur]
+        total_duration = dur if dur > 0 else None
+    else:
+        per_durations = [await probe_duration_seconds(vp) for vp in video_paths]
+        probed_total = sum(d for d in per_durations if d > 0)
+        total_duration = probed_total if probed_total > 0 else (float(duration) if duration and duration > 0 else None)
+
+    threshold_sec = settings.video_preview_threshold_min * 60
+    is_long = (total_duration or 0.0) > threshold_sec
+    do_preview = stage == "preview" and is_long and bool(total_duration)
+
+    client = await _whisper_client(settings)
+    primary_video = video_paths[0]
+
+    if do_preview and total_duration:
+        preview_budget = min(
+            float(total_duration),
+            max(30.0, float(total_duration) * settings.video_preview_fraction),
+        )
+        remaining = preview_budget
+        chunks: list[str] = []
+        audio_sec = 0.0
+
+        for vi, vp in enumerate(video_paths, 1):
+            if remaining <= 0.5:
+                break
+            vdur = per_durations[vi - 1]
+            seg_dur = min(vdur, remaining) if vdur > 0 else remaining
+            seg_path = str(Path(vp).with_name(Path(vp).stem + "_preview.mp3"))
+            if vdur > 0 and seg_dur >= vdur - 0.5:
+                audio_for_asr = await _extract_audio_safe(vp)
+            else:
+                try:
+                    audio_for_asr = await extract_audio_segment(vp, 0, seg_dur, seg_path)
+                except Exception as e:
+                    log.warning("preview_segment_extract_failed", path=vp, error=str(e)[:200])
+                    audio_for_asr = await _extract_audio_safe(vp)
+
+            tr = await client.transcribe(audio_for_asr, language="auto")
+            piece = normalize_asr_glitches(tr.text)
+            piece = await localize_transcript_to_russian(
+                piece, language=getattr(tr, "language", None), session=session
+            )
+            if len(video_paths) > 1:
+                chunks.append(f"[Видео {vi}]\n{piece}")
+            else:
+                chunks.append(piece)
+            audio_sec += tr.audio_seconds or 0.0
+            remaining -= tr.audio_seconds or seg_dur
+
+        text = "\n\n".join(chunks)
+        if extra_block:
+            text = f"{text}\n\n{extra_block}" if text else extra_block
+
+        frames_dir = str(Path(primary_video).with_name(Path(primary_video).stem + "_preview_frames"))
+        frames = await extract_keyframes(
+            primary_video,
+            frames_dir,
+            every_seconds=max(8, int(preview_budget / 4)),
+            max_frames=6,
+            duration_limit=preview_budget,
+        )
+        ocr = await ocr_frames(frames)
+        if ocr:
+            text = f"{text}\n\n[On-screen text OCR preview]\n{ocr}" if text else f"[On-screen text OCR preview]\n{ocr}"
+        return text, title, total_duration, audio_sec, primary_video
+
+    chunks = []
+    audio_sec = 0.0
+    for vi, vp in enumerate(video_paths, 1):
+        audio_for_asr = await _extract_audio_safe(vp)
+        tr = await client.transcribe(audio_for_asr, language="auto")
+        piece = normalize_asr_glitches(tr.text)
+        piece = await localize_transcript_to_russian(
+            piece, language=getattr(tr, "language", None), session=session
+        )
+        if len(video_paths) > 1:
+            chunks.append(f"[Видео {vi}]\n{piece}")
+        else:
+            chunks.append(piece)
+        audio_sec += tr.audio_seconds or 0.0
+
+    text = "\n\n".join(chunks)
+    if extra_block:
+        text = f"{text}\n\n{extra_block}" if text else extra_block
+
+    out_atlas = atlas_dir or str(Path(primary_video).with_name(Path(primary_video).stem + "_atlas"))
+    try:
+        atlas_frames = await build_screen_atlas(
+            primary_video,
+            out_atlas,
+            duration=total_duration,
+            source_type=source_type,
+            keep_top_n=24,
+        )
+        ocr_block = format_timed_ocr_block(atlas_frames)
+        if ocr_block:
+            text = f"{text}\n\n{ocr_block}"
+        elif source_type == "video":
+            frames_dir = str(Path(primary_video).with_name(Path(primary_video).stem + "_frames"))
+            frames = await extract_keyframes(primary_video, frames_dir)
+            ocr = await ocr_frames(frames)
+            if ocr:
+                text = f"{text}\n\n[On-screen text OCR]\n{ocr}"
+    except Exception as e:
+        log.warning("screen_atlas_failed", error=str(e)[:300])
+        if source_type == "video":
+            frames_dir = str(Path(primary_video).with_name(Path(primary_video).stem + "_frames"))
+            frames = await extract_keyframes(primary_video, frames_dir)
+            ocr = await ocr_frames(frames)
+            if ocr:
+                text = f"{text}\n\n[On-screen text OCR]\n{ocr}"
+    return text, title, total_duration, audio_sec, primary_video
+
+
 async def extract_text_for_material(
     *,
     source_type: str,
@@ -84,7 +232,6 @@ async def extract_text_for_material(
     atlas_dir — optional dir for timed OCR atlas (materials/{id}/atlas).
     """
     settings = settings or get_settings()
-    from app.services.localize import localize_transcript_to_russian
 
     if source_type == "note":
         return (note_text or "").strip(), (note_text or "")[:80], None, 0.0, None
@@ -135,7 +282,32 @@ async def extract_text_for_material(
     if source_type in {"youtube", "instagram", "tiktok", "video"}:
         if source_type in {"youtube", "instagram", "tiktok"}:
             assert source_url
-            bundle = await download_media_bundle(source_url, label=source_type)
+            try:
+                bundle = await download_media_bundle(source_url, label=source_type)
+            except Exception as download_err:
+                if (
+                    file_path
+                    and Path(file_path).is_file()
+                    and Path(file_path).stat().st_size > 0
+                    and Path(file_path).suffix.lower() in _VIDEO_FILE_SUFFIXES
+                ):
+                    log.warning(
+                        "media_download_failed_using_local",
+                        source_type=source_type,
+                        file_path=file_path,
+                        error=str(download_err)[:200],
+                    )
+                    return await _extract_video_pipeline(
+                        video_paths=[file_path],
+                        title=None,
+                        duration=None,
+                        source_type=source_type,
+                        stage=stage,
+                        settings=settings,
+                        atlas_dir=atlas_dir,
+                        session=session,
+                    )
+                raise
             title = bundle.title
             duration = bundle.duration or None
             if bundle.image_paths:
@@ -156,116 +328,28 @@ async def extract_text_for_material(
                 text = extra_block or title
                 return text, title, None, 0.0, media
 
-            client = await _whisper_client(settings)
-            chunks: list[str] = []
-            audio_sec = 0.0
-            for vi, vp in enumerate(bundle.video_paths, 1):
-                audio_path = str(Path(vp).with_suffix(".mp3"))
-                try:
-                    audio_path = await extract_audio(vp, audio_path)
-                except Exception:
-                    audio_path = vp
-                tr = await client.transcribe(audio_path, language="auto")
-                piece = normalize_asr_glitches(tr.text)
-                piece = await localize_transcript_to_russian(
-                    piece, language=getattr(tr, "language", None), session=session
-                )
-                if len(bundle.video_paths) > 1:
-                    chunks.append(f"[Видео {vi}]\n{piece}")
-                else:
-                    chunks.append(piece)
-                audio_sec += tr.audio_seconds or 0
-            text = "\n\n".join(chunks)
-            if extra_block:
-                text = f"{text}\n\n{extra_block}"
-
-            media_path = bundle.video_path
-            video_for_frames = media_path
-            out_atlas = atlas_dir
-            if not out_atlas and video_for_frames:
-                out_atlas = str(Path(video_for_frames).with_name(Path(video_for_frames).stem + "_atlas"))
-            try:
-                atlas_frames = await build_screen_atlas(
-                    video_for_frames,
-                    out_atlas,
-                    duration=duration,
-                    source_type=source_type,
-                    keep_top_n=24,
-                )
-                ocr_block = format_timed_ocr_block(atlas_frames)
-                if ocr_block:
-                    text = f"{text}\n\n{ocr_block}"
-            except Exception as e:
-                log.warning("screen_atlas_failed", error=str(e)[:300])
-            return text, title, duration, audio_sec, media_path
-
-        assert file_path
-        title = Path(file_path).name
-        duration = await probe_duration_seconds(file_path)
-        audio_path = str(Path(file_path).with_suffix(".mp3"))
-        audio_path = await extract_audio(file_path, audio_path)
-        video_for_frames = file_path
-        media_path = file_path
-
-        threshold_sec = settings.video_preview_threshold_min * 60
-        is_long = (duration or 0) > threshold_sec
-        do_preview = stage == "preview" and is_long
-
-        client = await _whisper_client(settings)
-        if do_preview and duration:
-            seg_dur = max(30.0, duration * settings.video_preview_fraction)
-            seg_path = str(Path(audio_path).with_name(Path(audio_path).stem + "_preview.mp3"))
-            src_for_cut = video_for_frames
-            try:
-                await extract_audio_segment(src_for_cut, 0, seg_dur, seg_path)
-                tr = await client.transcribe(seg_path, language="auto")
-            except Exception:
-                tr = await client.transcribe(audio_path, language="auto")
-            text = normalize_asr_glitches(tr.text)
-            text = await localize_transcript_to_russian(
-                text, language=getattr(tr, "language", None), session=session
-            )
-            frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_preview_frames"))
-            frames = await extract_keyframes(
-                video_for_frames, frames_dir, every_seconds=max(8, int(seg_dur / 4)), max_frames=6
-            )
-            ocr = await ocr_frames(frames)
-            if ocr:
-                text = f"{text}\n\n[On-screen text OCR preview]\n{ocr}"
-            return text, title, duration, tr.audio_seconds, media_path
-
-        tr = await client.transcribe(audio_path, language="auto")
-        text = normalize_asr_glitches(tr.text)
-        text = await localize_transcript_to_russian(
-            text, language=getattr(tr, "language", None), session=session
-        )
-        out_atlas = atlas_dir
-        if not out_atlas and video_for_frames:
-            out_atlas = str(Path(video_for_frames).with_name(Path(video_for_frames).stem + "_atlas"))
-        try:
-            atlas_frames = await build_screen_atlas(
-                video_for_frames,
-                out_atlas,
+            return await _extract_video_pipeline(
+                video_paths=bundle.video_paths,
+                title=title,
                 duration=duration,
                 source_type=source_type,
-                keep_top_n=24,
+                stage=stage,
+                settings=settings,
+                atlas_dir=atlas_dir,
+                session=session,
+                extra_block=extra_block,
             )
-            ocr_block = format_timed_ocr_block(atlas_frames)
-            if ocr_block:
-                text = f"{text}\n\n{ocr_block}"
-            else:
-                frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_frames"))
-                frames = await extract_keyframes(video_for_frames, frames_dir)
-                ocr = await ocr_frames(frames)
-                if ocr:
-                    text = f"{text}\n\n[On-screen text OCR]\n{ocr}"
-        except Exception as e:
-            log.warning("screen_atlas_failed", error=str(e)[:300])
-            frames_dir = str(Path(audio_path).with_name(Path(audio_path).stem + "_frames"))
-            frames = await extract_keyframes(video_for_frames, frames_dir)
-            ocr = await ocr_frames(frames)
-            if ocr:
-                text = f"{text}\n\n[On-screen text OCR]\n{ocr}"
-        return text, title, duration, tr.audio_seconds, media_path
+
+        assert file_path
+        return await _extract_video_pipeline(
+            video_paths=[file_path],
+            title=Path(file_path).name,
+            duration=None,
+            source_type=source_type,
+            stage=stage,
+            settings=settings,
+            atlas_dir=atlas_dir,
+            session=session,
+        )
 
     raise ValueError(f"Unknown source_type={source_type}")
