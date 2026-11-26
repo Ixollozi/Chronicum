@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.config import get_settings
 from app.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -12,12 +13,24 @@ _mcp: Any = None
 _asgi: Any = None
 
 
+def _current_mcp_auth_policy() -> tuple[str, bool]:
+    settings = get_settings()
+    token = (settings.web_api_token or "").strip()
+    try:
+        from chronicum_mcp.config import set_runtime_token
+
+        set_runtime_token(token)
+    except Exception:
+        pass
+    return token, bool(settings.allow_placeholder_secrets)
+
+
 def build_mcp_asgi() -> tuple[Any, Any] | tuple[None, None]:
     global _mcp, _asgi
     if _mcp is not None:
         return _mcp, _asgi
     try:
-        from chronicum_mcp.config import api_token
+        from chronicum_mcp.config import set_runtime_token
         from chronicum_mcp.http_auth import BearerAuthMiddleware
         from chronicum_mcp.tools import create_mcp
     except ImportError as exc:
@@ -25,12 +38,24 @@ def build_mcp_asgi() -> tuple[Any, Any] | tuple[None, None]:
         return None, None
 
     try:
+        token, allow_placeholders = _current_mcp_auth_policy()
+        set_runtime_token(token)
         mcp = create_mcp()
         app = mcp.streamable_http_app(streamable_http_path="/")
         if hasattr(app, "add_middleware"):
-            app.add_middleware(BearerAuthMiddleware, token=api_token())
+            app.add_middleware(
+                BearerAuthMiddleware,
+                token=token,
+                allow_placeholder_secrets=allow_placeholders,
+                token_provider=_current_mcp_auth_policy,
+            )
         else:
-            app = BearerAuthMiddleware(app, api_token())
+            app = BearerAuthMiddleware(
+                app,
+                token=token,
+                allow_placeholder_secrets=allow_placeholders,
+                token_provider=_current_mcp_auth_policy,
+            )
         _mcp, _asgi = mcp, app
         log.info("mcp_http_ready", path="/mcp")
         return mcp, app

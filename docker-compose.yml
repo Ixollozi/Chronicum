@@ -25,11 +25,29 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    environment:
+      STORAGE_PATH: /data/files
+    volumes:
+      - ./backend:/app
+      - file_data:/data/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    command: alembic upgrade head
+
   api:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     env_file: .env
+    environment:
+      STORAGE_PATH: /data/files
     volumes:
       - ./backend:/app
       - file_data:/data/files
@@ -40,15 +58,17 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: >
-      sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+      migrate:
+        condition: service_completed_successfully
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   worker:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     env_file: .env
+    environment:
+      STORAGE_PATH: /data/files
     volumes:
       - ./backend:/app
       - file_data:/data/files
@@ -57,15 +77,17 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: >
-      sh -c "alembic upgrade head &&
-             arq app.workers.settings.WorkerSettings"
+      migrate:
+        condition: service_completed_successfully
+    command: arq app.workers.settings.WorkerSettings
 
   bot:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     env_file: .env
+    environment:
+      STORAGE_PATH: /data/files
     volumes:
       - ./backend:/app
       - file_data:/data/files
@@ -74,6 +96,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       api:
         condition: service_started
     command: python -m app.bot.main
@@ -84,7 +108,6 @@ services:
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-        NEXT_PUBLIC_WEB_API_TOKEN: ${NEXT_PUBLIC_WEB_API_TOKEN:-chronicum-dev-token}
     env_file: .env
     ports:
       - "3000:3000"

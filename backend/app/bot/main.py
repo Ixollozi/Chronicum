@@ -55,14 +55,27 @@ def card_short(m: Material) -> str:
     )
 
 
-async def _need_ai(message: Message) -> bool:
-    """Return True if AI is ready; otherwise warn and return False."""
+async def _ai_is_ready() -> bool:
+    """True if AI key is configured in .env OR stored in the DB key pool."""
     settings = get_settings()
     if settings.ai_ready:
         return True
+    try:
+        from app.services.key_pool import any_provider_ready
+
+        async with SessionLocal() as session:
+            return await any_provider_ready(session)
+    except Exception:
+        return False
+
+
+async def _need_ai(message: Message) -> bool:
+    """Return True if AI is ready; otherwise warn and return False."""
+    if await _ai_is_ready():
+        return True
     await message.answer(
-        "GROQ_API_KEY (или GOOGLE_AI_API_KEY) не задан в .env — "
-        "обработка/поиск недоступны. Положи ключ и перезапусти API + бота."
+        "Не найдено ни одного активного AI-ключа (ни в .env, ни в Настройках Web). "
+        "Добавь Groq или Gemini ключ в Настройках или в .env."
     )
     return False
 
@@ -76,11 +89,13 @@ def create_dispatcher() -> Dispatcher:
             await message.answer("Access denied. Укажи TELEGRAM_OWNER_ID своего user id.")
             return
         s = get_settings()
+        ai_ok = await _ai_is_ready()
         await message.answer(
             "Chronicum MVP\n\n"
             "Пришли ссылку, файл, голосовое или текстовую заметку.\n"
-            "Вопрос на естественном языке — поиск по базе.\n\n"
+            "Вопрос на естественном языке (или /ask <вопрос>) — поиск по базе.\n\n"
             "Команды:\n"
+            "/ask <вопрос> — поиск по базе\n"
             "/whoami — твой Telegram id (для TELEGRAM_OWNER_ID)\n"
             "/status — готовность AI/токена\n"
             "/retry <id>\n"
@@ -89,9 +104,23 @@ def create_dispatcher() -> Dispatcher:
             "/approve_tag <tag>\n"
             "/reject_tag <tag>\n"
             "/pending_tags\n\n"
-            f"AI: {'ok' if s.ai_ready else 'нет ключа'} · "
+            f"AI: {'ok' if ai_ok else 'нет ключа'} · "
             f"owner_id: {s.telegram_owner_id or 'не задан (открытый доступ)'}"
         )
+
+    @dp.message(Command("ask"))
+    async def ask_cmd(message: Message, command: CommandObject) -> None:
+        if not _owner_ok(message):
+            return
+        q = (command.args or "").strip()
+        if not q:
+            await message.answer("Usage: /ask <вопрос по базе>")
+            return
+        if not await _need_ai(message):
+            return
+        async with SessionLocal() as session:
+            answer, _ = await answer_question(session, q)
+        await message.answer(answer[:4000])
 
     @dp.message(Command("whoami"))
     async def whoami(message: Message) -> None:
@@ -107,10 +136,11 @@ def create_dispatcher() -> Dispatcher:
             return
         get_settings.cache_clear()
         s = get_settings()
+        ai_ok = await _ai_is_ready()
         await message.answer(
             "Chronicum status\n"
             f"telegram_ready: {s.telegram_ready}\n"
-            f"ai_ready: {s.ai_ready}\n"
+            f"ai_ready: {ai_ok}\n"
             f"lite: {s.is_lite}\n"
             f"owner_id: {s.telegram_owner_id}\n"
             f"ai_provider: {s.ai_provider}"
@@ -471,7 +501,7 @@ def create_dispatcher() -> Dispatcher:
             await message.answer(f"Принято ({source_type}), в очереди.\nid: `{m.id}`")
             return
 
-        if is_question or len(text) > 280:
+        if is_question:
             if not await _need_ai(message):
                 return
             async with SessionLocal() as session:
@@ -527,12 +557,23 @@ async def run_bot() -> None:
                 break
             log.info("still_waiting_for_TELEGRAM_BOT_TOKEN")
 
-    if not settings.ai_ready:
+    settings.validate_security_posture()
+    for warning in settings.security_warnings():
+        log.warning("security_posture_warning", detail=warning)
+
+    if settings.is_lite:
+        from app.db import init_lite_db
+        from app.services.queue import recover_lite_queue
+
+        await init_lite_db()
+        await recover_lite_queue()
+
+    if not await _ai_is_ready():
         log.warning(
             "bot_starting_without_ai",
-            hint="Processing will fail until GROQ_API_KEY is set; polling still starts.",
+            hint="Processing will fail until GROQ_API_KEY/Google key is set in .env or Web Settings.",
         )
-        print("[Chronicum bot] WARNING: AI key missing — intake messages will warn until Groq is set.\n")
+        print("[Chronicum bot] WARNING: AI key missing — intake messages will warn until a key is configured.\n")
 
     settings.require_telegram()
     bot = Bot(token=settings.telegram_bot_token)
@@ -540,7 +581,13 @@ async def run_bot() -> None:
     me = await bot.get_me()
     log.info("bot_starting", username=me.username, owner_id=settings.telegram_owner_id)
     print(f"[Chronicum bot] @{me.username} polling… owner_id={settings.telegram_owner_id}")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        if settings.is_lite:
+            from app.services.queue import shutdown_lite_queue
+
+            await shutdown_lite_queue()
 
 
 def main() -> None:

@@ -34,7 +34,7 @@ async def extract_pdf_text(path: str) -> str:
 
         try:
             images = convert_from_path(path, dpi=200)
-            ocr_parts = [pytesseract.image_to_string(img) for img in images[:30]]
+            ocr_parts = [pytesseract.image_to_string(img, lang="rus+eng") for img in images[:30]]
             ocr = "\n".join(ocr_parts).strip()
             return ocr or text or f"[Empty PDF: {Path(path).name}]"
         except Exception as e:

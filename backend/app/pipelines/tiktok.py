@@ -177,9 +177,6 @@ def download_tiktok_images(url: str, out_dir: Path, *, cookies_file: str = "") -
         with httpx.Client(follow_redirects=True, timeout=45.0, headers=headers) as client:
             for i, src in enumerate(urls, start=1):
                 dest = out_dir / f"tt_photo_{i}.jpg"
-                if dest.exists() and dest.stat().st_size > 400:
-                    paths.append(str(dest))
-                    continue
                 resp = client.get(src)
                 resp.raise_for_status()
                 dest.write_bytes(resp.content)

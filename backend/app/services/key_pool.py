@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.config import get_settings
 from app.logging_setup import get_logger
@@ -297,22 +297,30 @@ async def delete_key(session: AsyncSession, key_id: int) -> None:
     await session.commit()
 
 
-async def _rr_index(session: AsyncSession, provider: str) -> int:
-    key = f"rr_{provider}"
-    row = await session.get(AppSetting, key)
-    try:
-        return int(row.value) if row else 0
-    except (TypeError, ValueError):
-        return 0
+_rr_counters: dict[str, int] = {}
 
 
-async def _set_rr_index(session: AsyncSession, provider: str, idx: int) -> None:
-    await _upsert_setting(session, f"rr_{provider}", str(idx))
-    await session.commit()
+async def _commit_isolated(session: AsyncSession, fn) -> None:
+    """
+    Persist key-pool metadata without committing the caller's open Material transaction.
+    Uses a short-lived sibling session on the same engine whenever safe; if the caller
+    already holds an open SQLite transaction, mutates inside the caller's session
+    without issuing an early commit (preventing premature commits AND SQLite lock deadlocks).
+    """
+    bind = session.get_bind()
+    is_sqlite = getattr(getattr(bind, "dialect", None), "name", "") == "sqlite"
+    if is_sqlite and (session.in_transaction() or session.new or session.dirty or session.deleted):
+        await fn(session)
+        await session.flush()
+        return
+    async_bind = bind if isinstance(bind, AsyncEngine) else AsyncEngine(bind)
+    async with AsyncSession(async_bind, expire_on_commit=False) as iso:
+        await fn(iso)
+        await iso.commit()
 
 
 async def acquire_keys(session: AsyncSession, provider: str) -> list[PooledKey]:
-    """Ordered list of usable keys for provider (CRM enabled + env)."""
+    """Ordered list of usable keys for provider (CRM enabled + env) without committing caller session."""
     rows = (
         await session.execute(
             select(ApiKey).where(ApiKey.provider == provider, ApiKey.enabled.is_(True)).order_by(ApiKey.id.asc())
@@ -335,25 +343,27 @@ async def acquire_keys(session: AsyncSession, provider: str) -> list[PooledKey]:
     if not pooled:
         return []
 
-    start = await _rr_index(session, provider)
-    start = start % len(pooled)
+    start = _rr_counters.get(provider, 0) % len(pooled)
     ordered = pooled[start:] + pooled[:start]
-    await _set_rr_index(session, provider, (start + 1) % len(pooled))
+    _rr_counters[provider] = (start + 1) % len(pooled)
     return ordered
 
 
 async def mark_key_result(session: AsyncSession, key_id: int | str, *, ok: bool, error: str | None = None) -> None:
     if isinstance(key_id, str):
         return
-    row = await session.get(ApiKey, key_id)
-    if not row:
-        return
-    if ok:
-        row.last_ok_at = datetime.now(timezone.utc)
-        row.last_error = None
-    else:
-        row.last_error = (error or "error")[:500]
-    await session.commit()
+
+    async def _update(s: AsyncSession) -> None:
+        row = await s.get(ApiKey, key_id)
+        if not row:
+            return
+        if ok:
+            row.last_ok_at = datetime.now(timezone.utc)
+            row.last_error = None
+        else:
+            row.last_error = (error or "error")[:500]
+
+    await _commit_isolated(session, _update)
 
 
 async def any_provider_ready(session: AsyncSession) -> bool:

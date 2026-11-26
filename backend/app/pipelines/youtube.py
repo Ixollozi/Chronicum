@@ -536,7 +536,9 @@ def _merge_instagram_carousel(bundle: MediaBundle, url: str, out_dir: Path, cook
 
 
 async def download_media_bundle(url: str, *, label: str = "media") -> MediaBundle:
-    out_dir = ensure_storage() / label
+    from uuid import uuid4
+
+    out_dir = ensure_storage() / label / uuid4().hex[:12]
     out_dir.mkdir(parents=True, exist_ok=True)
     settings = get_settings()
     from app.services.cookies import resolve_cookies_file

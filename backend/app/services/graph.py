@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections import defaultdict
 
 from sqlalchemy import select
@@ -12,6 +14,8 @@ from app.models import Material, MaterialTag, ProcessingStatus
 from app.search.embeddings import (
     LOCAL_EMBED_MODEL,
     cosine_similarity,
+    local_embed_text,
+    material_embedding_text,
     material_vector_for_model,
 )
 
@@ -20,6 +24,17 @@ from app.services.taxonomy import TAG_DISPLAY, normalize_category_key, normalize
 
 _SEMANTIC_EDGE_THRESHOLD = 0.36
 _MAX_MATERIAL_EDGES_PER_KIND = 2
+_GRAPH_CACHE_TTL_SECONDS = 30.0
+_graph_cache: dict[tuple[int, int, str], tuple[float, dict]] = {}
+
+
+def invalidate_graph_cache() -> None:
+    _graph_cache.clear()
+
+
+def _cache_key(session: AsyncSession, limit: int, mode: str) -> tuple[int, int, str]:
+    bind_id = id(session.get_bind()) if session is not None else 0
+    return (bind_id, limit, mode)
 
 
 def _material_entities(m: Material) -> dict[str, str]:
@@ -49,7 +64,14 @@ def _tag_title(name: str) -> str:
     return TAG_DISPLAY.get(key, name.strip())
 
 
-async def build_graph(session: AsyncSession, *, limit: int = 300) -> dict:
+async def build_graph(session: AsyncSession, *, limit: int = 300, include_semantic: bool = True) -> dict:
+    mode = "full" if include_semantic else "light"
+    ckey = _cache_key(session, limit, mode)
+    cached = _graph_cache.get(ckey)
+    now = time.monotonic()
+    if cached and (now - cached[0]) < _GRAPH_CACHE_TTL_SECONDS:
+        return cached[1]
+
     rows = (
         await session.execute(
             select(Material)
@@ -222,53 +244,81 @@ async def build_graph(session: AsyncSession, *, limit: int = 300) -> dict:
             touch(pair[0], pair[1])
 
     # Material ↔ Material links: semantic similarity (top-K per material above threshold)
-    vec_by_mid: dict[str, tuple[str, list[float]]] = {}
-    for m in rows:
-        emb = getattr(m, "embedding", None)
-        if isinstance(emb, dict) and emb.get("model") and isinstance(emb.get("vec"), list) and emb["vec"]:
-            vec_by_mid[m.id] = (str(emb["model"]), emb["vec"])
-        else:
-            local_vec = material_vector_for_model(m, LOCAL_EMBED_MODEL)
-            if local_vec:
-                vec_by_mid[m.id] = (LOCAL_EMBED_MODEL, local_vec)
+    # Run off the event loop and fall back cleanly to local vectors when providers differ.
+    if include_semantic and len(rows) >= 2:
+        mat_inputs: list[tuple[str, dict | None, str]] = [
+            (m.id, getattr(m, "embedding", None), material_embedding_text(m))
+            for m in rows
+        ]
 
-    mids_with_vec = list(vec_by_mid.keys())
-    sem_neighbors: dict[str, list[tuple[float, str]]] = defaultdict(list)
-    for i in range(len(mids_with_vec)):
-        a = mids_with_vec[i]
-        model_a, vec_a = vec_by_mid[a]
-        for j in range(i + 1, len(mids_with_vec)):
-            b = mids_with_vec[j]
-            model_b, vec_b = vec_by_mid[b]
-            if model_a != model_b:
-                continue
-            sim = cosine_similarity(vec_a, vec_b)
-            if sim >= _SEMANTIC_EDGE_THRESHOLD:
-                sem_neighbors[a].append((sim, b))
-                sem_neighbors[b].append((sim, a))
+        def _compute_semantic_edges() -> list[tuple[str, str, float]]:
+            vec_by_mid: dict[str, tuple[str, list[float]]] = {}
+            local_by_mid: dict[str, list[float]] = {}
+            for mid, emb, emb_text in mat_inputs:
+                if isinstance(emb, dict) and emb.get("model") and isinstance(emb.get("vec"), list) and emb["vec"]:
+                    model_name = str(emb["model"])
+                    vec_by_mid[mid] = (model_name, emb["vec"])
+                    if model_name == LOCAL_EMBED_MODEL:
+                        local_by_mid[mid] = emb["vec"]
+                    elif emb_text:
+                        lv = local_embed_text(emb_text)
+                        if lv:
+                            local_by_mid[mid] = lv
+                elif emb_text:
+                    lv = local_embed_text(emb_text)
+                    if lv:
+                        vec_by_mid[mid] = (LOCAL_EMBED_MODEL, lv)
+                        local_by_mid[mid] = lv
 
-    seen_sem_edges: set[tuple[str, str]] = set()
-    for mid, cands in sem_neighbors.items():
-        cands.sort(key=lambda item: (-item[0], item[1]))
-        for sim, other in cands[:_MAX_MATERIAL_EDGES_PER_KIND]:
-            pair = (mid, other) if mid < other else (other, mid)
-            if pair in seen_sem_edges:
-                continue
-            seen_sem_edges.add(pair)
+            mids_with_vec = list(vec_by_mid.keys())
+            sem_neighbors: dict[str, list[tuple[float, str]]] = defaultdict(list)
+            for i in range(len(mids_with_vec)):
+                a = mids_with_vec[i]
+                model_a, vec_a = vec_by_mid[a]
+                for j in range(i + 1, len(mids_with_vec)):
+                    b = mids_with_vec[j]
+                    model_b, vec_b = vec_by_mid[b]
+                    if model_a == model_b:
+                        sim = cosine_similarity(vec_a, vec_b)
+                    else:
+                        la = local_by_mid.get(a)
+                        lb = local_by_mid.get(b)
+                        if not la or not lb:
+                            continue
+                        sim = cosine_similarity(la, lb)
+                    if sim >= _SEMANTIC_EDGE_THRESHOLD:
+                        sem_neighbors[a].append((sim, b))
+                        sem_neighbors[b].append((sim, a))
+
+            seen_sem_edges: set[tuple[str, str]] = set()
+            edges: list[tuple[str, str, float]] = []
+            for mid, cands in sem_neighbors.items():
+                cands.sort(key=lambda item: (-item[0], item[1]))
+                for sim, other in cands[:_MAX_MATERIAL_EDGES_PER_KIND]:
+                    pair = (mid, other) if mid < other else (other, mid)
+                    if pair in seen_sem_edges:
+                        continue
+                    seen_sem_edges.add(pair)
+                    edges.append((pair[0], pair[1], sim))
+            return edges
+
+        for src, tgt, sim in await asyncio.to_thread(_compute_semantic_edges):
             links.append(
                 {
-                    "source": pair[0],
-                    "target": pair[1],
+                    "source": src,
+                    "target": tgt,
                     "reason": "semantic",
                     "weight": max(1, int(round(sim * 100))),
                     "similarity": round(sim, 3),
                 }
             )
-            touch(pair[0], pair[1])
+            touch(src, tgt)
 
     nodes = []
     for n in nodes_by_id.values():
         n["degree"] = degree.get(n["id"], 0)
         nodes.append(n)
 
-    return {"nodes": nodes, "links": links}
+    payload = {"nodes": nodes, "links": links}
+    _graph_cache[ckey] = (time.monotonic(), payload)
+    return payload

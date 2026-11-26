@@ -158,11 +158,13 @@ def save_cookies_content(content: str, *, settings: Any | None = None) -> Cookie
     normalized, _, _ = validate_netscape_cookies(content)
     target = managed_cookies_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(normalized, encoding="utf-8")
+    tmp = target.with_suffix(".txt.tmp")
+    tmp.write_text(normalized, encoding="utf-8")
     try:
-        os.chmod(target, 0o600)
+        os.chmod(tmp, 0o600)
     except OSError:
         pass
+    os.replace(tmp, target)
     return inspect_cookies_file(settings)
 
 

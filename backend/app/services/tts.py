@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from app.config import PROJECT_ROOT, get_settings
+from app.config import resolve_storage_root
 from app.logging_setup import get_logger
 
 log = get_logger(__name__)
+
+TTS_CACHE_MAX_FILES = 200
+TTS_CACHE_MAX_BYTES = 200 * 1024 * 1024
+TTS_CACHE_MAX_AGE_SECONDS = 14 * 86400
 
 VOICES = {
     "svetlana": {
@@ -55,13 +61,51 @@ def resolve_voice(key: str | None) -> tuple[str, str]:
 
 
 def _cache_dir() -> Path:
-    settings = get_settings()
-    root = Path(settings.storage_path)
-    if not root.is_absolute():
-        root = PROJECT_ROOT / root
-    d = root / "tts_cache"
+    d = resolve_storage_root() / "tts_cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def prune_tts_cache(
+    cache_dir: Path | None = None,
+    *,
+    max_files: int = TTS_CACHE_MAX_FILES,
+    max_bytes: int = TTS_CACHE_MAX_BYTES,
+    max_age_seconds: int = TTS_CACHE_MAX_AGE_SECONDS,
+) -> int:
+    """Evict expired or LRU TTS mp3 cache entries so disk usage remains bounded."""
+    d = cache_dir or _cache_dir()
+    if not d.is_dir():
+        return 0
+    now = time.time()
+    entries: list[tuple[float, int, Path]] = []
+    removed = 0
+    for p in d.glob("*.mp3"):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if max_age_seconds > 0 and (now - st.st_mtime) > max_age_seconds:
+            p.unlink(missing_ok=True)
+            removed += 1
+            continue
+        entries.append((st.st_mtime, st.st_size, p))
+
+    # Oldest first
+    entries.sort(key=lambda item: item[0])
+    total_bytes = sum(sz for _, sz, _ in entries)
+    total_files = len(entries)
+    for _, sz, p in entries:
+        if total_files <= max_files and total_bytes <= max_bytes:
+            break
+        try:
+            p.unlink(missing_ok=True)
+            removed += 1
+            total_files -= 1
+            total_bytes -= sz
+        except OSError:
+            continue
+    return removed
 
 
 def cache_path_for(prepared: str, voice_id: str) -> Path:
@@ -92,6 +136,7 @@ async def synthesize_speech(text: str, voice_key: str | None = None) -> tuple[Pa
             tmp.unlink(missing_ok=True)
         raise
 
+    await asyncio.to_thread(prune_tts_cache, out.parent)
     log.info("tts_synthesized", voice=voice_id, chars=len(prepared), bytes=out.stat().st_size)
     return out, key
 
@@ -133,6 +178,7 @@ async def iter_speech_audio(text: str, voice_key: str | None = None) -> AsyncIte
     try:
         tmp.write_bytes(buf)
         tmp.replace(out)
+        await asyncio.to_thread(prune_tts_cache, out.parent)
     except OSError:
         if tmp.exists():
             tmp.unlink(missing_ok=True)

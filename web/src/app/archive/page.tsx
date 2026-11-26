@@ -88,16 +88,28 @@ export default function ArchivePage() {
   const [tags, setTags] = useState<{ id: number; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectMode, setSelectMode] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const loadedCountRef = useRef(0);
+  const PAGE_SIZE = 50;
+
+  useEffect(() => {
+    loadedCountRef.current = items.length;
+  }, [items.length]);
 
   const load = useCallback(
-    async (opts?: { silent?: boolean }) => {
-      if (!opts?.silent) setLoading(true);
+    async (opts?: { silent?: boolean; append?: boolean; offset?: number }) => {
+      const append = Boolean(opts?.append);
+      const offset = opts?.offset ?? 0;
+      const limit =
+        opts?.silent && !append ? Math.max(PAGE_SIZE, loadedCountRef.current) : PAGE_SIZE;
+      if (append) setLoadingMore(true);
+      else if (!opts?.silent) setLoading(true);
       setError(null);
       try {
         const data = await client.listMaterials({
@@ -109,29 +121,41 @@ export default function ArchivePage() {
           entry_kind: entryKind || undefined,
           min_score: minScore ? Number(minScore) : undefined,
           sort: sort || "newest",
-          limit: 50,
+          limit,
+          offset,
         });
-        setItems(data.items);
         setTotal(data.total);
-        setSelected((prev) => {
-          const ids = new Set(data.items.map((i) => i.id));
-          return new Set([...prev].filter((id) => ids.has(id)));
-        });
-        setActiveId((prev) => {
-          if (prev && data.items.some((i) => i.id === prev)) return prev;
-          return data.items[0]?.id ?? null;
-        });
+        if (append) {
+          setItems((prev) => {
+            const seen = new Set(prev.map((i) => i.id));
+            const next = [...prev];
+            for (const row of data.items) {
+              if (!seen.has(row.id)) next.push(row);
+            }
+            return next;
+          });
+        } else {
+          setItems(data.items);
+          setSelected((prev) => {
+            const ids = new Set(data.items.map((i) => i.id));
+            return new Set([...prev].filter((id) => ids.has(id)));
+          });
+          setActiveId((prev) => {
+            if (prev && data.items.some((i) => i.id === prev)) return prev;
+            return data.items[0]?.id ?? null;
+          });
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : "Ошибка загрузки");
       } finally {
-        if (!opts?.silent) setLoading(false);
+        if (append) setLoadingMore(false);
+        else if (!opts?.silent) setLoading(false);
       }
     },
     [q, status, category, tag, sourceType, entryKind, minScore, sort]
   );
 
   useEffect(() => {
-    load();
     client
       .categories()
       .then((c) => setCategories(cleanCategories(c)))
@@ -140,6 +164,10 @@ export default function ArchivePage() {
       .listTags("approved")
       .then((t) => setTags(t))
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    load();
   }, [load]);
 
   useEffect(() => {
@@ -523,6 +551,20 @@ export default function ArchivePage() {
                   />
                 </div>
               ))
+            )}
+            {!loading && items.length < total && (
+              <div className="flex justify-center py-4">
+                <button
+                  type="button"
+                  disabled={loadingMore}
+                  onClick={() => void load({ append: true, offset: items.length })}
+                  className="card-btn"
+                >
+                  {loadingMore
+                    ? "Загружаю…"
+                    : `Загрузить ещё (${items.length} из ${total})`}
+                </button>
+              </div>
             )}
           </div>
         </div>

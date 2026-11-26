@@ -160,6 +160,12 @@ def _extract_json(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
+import threading
+
+# Process-wide lock serializing legacy google.generativeai.configure(api_key=...) calls
+_GEMINI_LOCK = threading.Lock()
+
+
 class LLMClient(ABC):
     provider: str = ""
     model: str = ""
@@ -173,6 +179,9 @@ class LLMClient(ABC):
     async def complete_text(self, system: str, user: str) -> str:
         ...
 
+    async def aclose(self) -> None:
+        return None
+
 
 class TranscribeClient(ABC):
     key_id: int | str | None = None
@@ -180,6 +189,9 @@ class TranscribeClient(ABC):
     @abstractmethod
     async def transcribe(self, path: str, language: str | None = None) -> TranscribeResult:
         ...
+
+    async def aclose(self) -> None:
+        return None
 
 
 class GroqLLMClient(LLMClient):
@@ -251,19 +263,31 @@ class GroqLLMClient(LLMClient):
         return (resp.choices[0].message.content or "").strip()
 
 
+    async def aclose(self) -> None:
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            res = close()
+            if hasattr(res, "__await__"):
+                await res
+
+
 class GoogleLLMClient(LLMClient):
     def __init__(self, settings: Settings, api_key: str, key_id: int | str | None = None):
-        import google.generativeai as genai
-
         if not api_key:
             raise RuntimeError("GOOGLE_AI_API_KEY required")
         self.settings = settings
         self.key_id = key_id
         self.provider = "google"
         self.api_key = api_key
-        genai.configure(api_key=api_key)
         self.model_name = settings.google_ai_model
-        self.model = genai.GenerativeModel(self.model_name)
+
+    def _generate_sync(self, prompt: str, generation_config: dict[str, Any]):
+        import google.generativeai as genai
+
+        with _GEMINI_LOCK:
+            genai.configure(api_key=self.api_key)
+            model = genai.GenerativeModel(self.model_name)
+            return model.generate_content(prompt, generation_config=generation_config)
 
     @retry(
         retry=retry_if_exception_type(SchemaValidationError),
@@ -277,9 +301,9 @@ class GoogleLLMClient(LLMClient):
         prompt = f"{system}\n\n{user}"
         try:
             resp = await asyncio.to_thread(
-                self.model.generate_content,
+                self._generate_sync,
                 prompt,
-                generation_config={"temperature": 0.2, "response_mime_type": "application/json"},
+                {"temperature": 0.2, "response_mime_type": "application/json"},
             )
         except Exception as e:
             msg = str(e).lower()
@@ -302,9 +326,9 @@ class GoogleLLMClient(LLMClient):
         prompt = f"{system}\n\n{user}"
         try:
             resp = await asyncio.to_thread(
-                self.model.generate_content,
+                self._generate_sync,
                 prompt,
-                generation_config={"temperature": 0.3},
+                {"temperature": 0.3},
             )
         except Exception as e:
             msg = str(e).lower()
@@ -322,6 +346,13 @@ class GroqTranscribeClient(TranscribeClient):
         self.key_id = key_id
         self.client = AsyncGroq(api_key=api_key)
         self.model = settings.groq_whisper_model
+
+    async def aclose(self) -> None:
+        close = getattr(self.client, "close", None)
+        if callable(close):
+            res = close()
+            if hasattr(res, "__await__"):
+                await res
 
     @staticmethod
     def _build_prompt(lang: str) -> str:
@@ -637,7 +668,7 @@ async def get_llm_client_pooled(session) -> LLMClient:
 
 
 async def with_llm_fallback(session, fn):
-    """Call async fn(client); on RateLimitError try next key/provider."""
+    """Call async fn(client); on RateLimitError try next key/provider and close clients cleanly."""
     from app.services.key_pool import acquire_keys, mark_key_result
 
     settings = get_settings()
@@ -657,7 +688,66 @@ async def with_llm_fallback(session, fn):
                 errors.append(f"{provider}:{pk.id}: {e}")
                 await mark_key_result(session, pk.id, ok=False, error=str(e)[:300])
                 continue
+            finally:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
     raise RuntimeError("All API keys exhausted: " + "; ".join(errors[:5]))
+
+
+async def with_transcribe_fallback(session, fn, *, settings: Settings | None = None):
+    """Call async fn(transcribe_client) rotating across all pooled Groq keys (DB + .env)."""
+    from app.services.key_pool import acquire_keys, mark_key_result
+
+    cfg = settings or get_settings()
+    if cfg.transcribe_provider != "groq":
+        raise RuntimeError(f"Unsupported TRANSCRIBE_PROVIDER={cfg.transcribe_provider}")
+    keys = await acquire_keys(session, "groq")
+    if not keys:
+        raise RuntimeError("No Groq keys for transcription — add in Settings or .env")
+
+    errors: list[str] = []
+    for pk in keys:
+        client = GroqTranscribeClient(cfg, pk.api_key, key_id=pk.id)
+        try:
+            result = await fn(client)
+            await mark_key_result(session, pk.id, ok=True)
+            return result
+        except RateLimitError as e:
+            errors.append(f"groq:{pk.id}: {e}")
+            await mark_key_result(session, pk.id, ok=False, error=str(e)[:300])
+            continue
+        finally:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+    raise RuntimeError("All Groq transcription keys exhausted: " + "; ".join(errors[:5]))
+
+
+class PooledTranscribeClient(TranscribeClient):
+    """TranscribeClient delegating each call through key-pool rotation and proper cleanup."""
+
+    def __init__(self, settings: Settings, session=None) -> None:
+        self.settings = settings
+        self.session = session
+
+    async def transcribe(self, path: str, language: str | None = None) -> TranscribeResult:
+        if self.session is not None:
+            return await with_transcribe_fallback(
+                self.session,
+                lambda c: c.transcribe(path, language=language),
+                settings=self.settings,
+            )
+        from app.db import SessionLocal
+
+        async with SessionLocal() as session:
+            return await with_transcribe_fallback(
+                session,
+                lambda c: c.transcribe(path, language=language),
+                settings=self.settings,
+            )
 
 
 async def get_transcribe_client_pooled(session) -> GroqTranscribeClient:

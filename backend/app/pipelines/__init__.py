@@ -39,15 +39,12 @@ def _persist_slides(paths: list[str], dest_dir: str) -> list[str]:
     return out
 
 
-async def _whisper_client(settings: Settings):
-    try:
-        return get_transcribe_client(settings)
-    except RuntimeError:
-        from app.ai import get_transcribe_client_pooled
-        from app.db import SessionLocal
+async def _whisper_client(settings: Settings, session=None):
+    from app.ai import PooledTranscribeClient
 
-        async with SessionLocal() as session:
-            return await get_transcribe_client_pooled(session)
+    if settings.transcribe_provider != "groq":
+        return get_transcribe_client(settings)
+    return PooledTranscribeClient(settings, session=session)
 
 
 async def ocr_frames(paths: list[str]) -> str:
@@ -111,7 +108,7 @@ async def _extract_video_pipeline(
     is_long = (total_duration or 0.0) > threshold_sec
     do_preview = stage == "preview" and is_long and bool(total_duration)
 
-    client = await _whisper_client(settings)
+    client = await _whisper_client(settings, session=session)
     primary_video = video_paths[0]
 
     if do_preview and total_duration:
@@ -267,7 +264,7 @@ async def extract_text_for_material(
                 log.warning("voice_convert_failed", error=str(e)[:200], path=file_path)
                 audio_for_asr = file_path
 
-        client = await _whisper_client(settings)
+        client = await _whisper_client(settings, session=session)
         # Voice notes are almost always Russian
         result = await client.transcribe(audio_for_asr, language="ru")
         title = Path(file_path).stem or "Голосовая заметка"

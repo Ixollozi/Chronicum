@@ -123,7 +123,12 @@ async def google_embed_text(
         return None
 
 
-def material_embedding_text(material: Any) -> str:
+def material_embedding_text(
+    material: Any,
+    *,
+    category_name: str | None = None,
+    tag_names: Sequence[str] | None = None,
+) -> str:
     """Build weighted canonical text representation of a Material for embedding."""
     parts: list[str] = []
     title = (getattr(material, "title", None) or "").strip()
@@ -137,13 +142,20 @@ def material_embedding_text(material: Any) -> str:
     main_idea = (getattr(material, "main_idea", None) or "").strip()
     if main_idea:
         parts.append(main_idea)
-    cat = getattr(material, "category", None)
-    if cat is not None and getattr(cat, "name", None):
-        parts.append(str(cat.name))
-    tags = getattr(material, "tags", None) or []
-    tag_names = [mt.tag.name for mt in tags if getattr(mt, "tag", None) and getattr(mt.tag, "name", None)]
-    if tag_names:
-        parts.append(" ".join(tag_names))
+    if category_name is not None:
+        if category_name.strip():
+            parts.append(category_name.strip())
+    else:
+        cat = getattr(material, "category", None)
+        if cat is not None and getattr(cat, "name", None):
+            parts.append(str(cat.name))
+    if tag_names is not None:
+        clean_tags = [str(t).strip() for t in tag_names if str(t).strip()]
+    else:
+        tags = getattr(material, "tags", None) or []
+        clean_tags = [mt.tag.name for mt in tags if getattr(mt, "tag", None) and getattr(mt.tag, "name", None)]
+    if clean_tags:
+        parts.append(" ".join(clean_tags))
     for field in ("tools", "technologies", "key_ideas", "practical_takeaways"):
         vals = getattr(material, field, None) or []
         if isinstance(vals, list) and vals:
@@ -159,12 +171,13 @@ async def compute_embedding(
     *,
     settings: Any | None = None,
     api_key: str | None = None,
+    session: Any | None = None,
 ) -> dict[str, Any] | None:
     """
     Compute an embedding payload `{"model": str, "dim": int, "vec": list[float]}`.
     Respects `settings.embedding_provider`:
       - "off": returns None
-      - "google": calls Gemini embedContent when a valid Google key is available, falls back to local
+      - "google": calls Gemini embedContent using explicit/DB-pooled/.env Google key, falls back to local
       - "local" / "auto": uses deterministic zero-dependency local semantic embeddings
     """
     cleaned = (text or "").strip()
@@ -176,9 +189,25 @@ async def compute_embedding(
         return None
 
     if provider == "google":
-        key = (api_key or getattr(cfg, "google_ai_api_key", "") or "").strip()
-        if key and not key.startswith("your_"):
-            model = (getattr(cfg, "google_embedding_model", "text-embedding-004") or "text-embedding-004").strip()
+        model = (getattr(cfg, "google_embedding_model", "text-embedding-004") or "text-embedding-004").strip()
+        candidate_keys: list[str] = []
+        if api_key and not api_key.strip().startswith("your_"):
+            candidate_keys.append(api_key.strip())
+        if session is not None:
+            try:
+                from app.services.key_pool import acquire_keys
+
+                pooled = await acquire_keys(session, "google")
+                for pk in pooled:
+                    if pk.api_key and pk.api_key not in candidate_keys:
+                        candidate_keys.append(pk.api_key)
+            except Exception:
+                pass
+        env_key = (getattr(cfg, "google_ai_api_key", "") or "").strip()
+        if env_key and not env_key.startswith("your_") and env_key not in candidate_keys:
+            candidate_keys.append(env_key)
+
+        for key in candidate_keys:
             vec = await google_embed_text(cleaned, api_key=key, model=model)
             if vec:
                 return {"model": f"google:{model}", "dim": len(vec), "vec": vec}
@@ -216,3 +245,67 @@ def material_vector_for_model(material: Any, model_name: str) -> list[float]:
         text = material_embedding_text(material)
         return local_embed_text(text) if text else []
     return []
+
+
+def active_embedding_model(settings: Any | None = None) -> str | None:
+    cfg = settings or get_settings()
+    provider = (getattr(cfg, "embedding_provider", "auto") or "auto").strip().lower()
+    if provider == "off":
+        return None
+    if provider == "google":
+        model = (getattr(cfg, "google_embedding_model", "text-embedding-004") or "text-embedding-004").strip()
+        return f"google:{model}"
+    return LOCAL_EMBED_MODEL
+
+
+async def reindex_embeddings(
+    session: Any,
+    *,
+    force: bool = False,
+    limit: int | None = None,
+    settings: Any | None = None,
+) -> dict[str, Any]:
+    """Recompute stored embeddings for materials whose model differs from the active provider."""
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from app.models import Material, MaterialTag, ProcessingStatus
+
+    cfg = settings or get_settings()
+    target_model = active_embedding_model(cfg)
+    if target_model is None:
+        return {"updated": 0, "skipped": 0, "target_model": None}
+
+    q = (
+        select(Material)
+        .options(
+            selectinload(Material.category),
+            selectinload(Material.tags).selectinload(MaterialTag.tag),
+        )
+        .where(Material.processing_status == ProcessingStatus.DONE.value)
+        .order_by(Material.created_at.desc())
+    )
+    if limit is not None and limit > 0:
+        q = q.limit(limit)
+
+    rows = (await session.execute(q)).scalars().all()
+    updated = 0
+    skipped = 0
+    for m in rows:
+        cur_model = m.embedding.get("model") if isinstance(m.embedding, dict) else None
+        if not force and cur_model == target_model:
+            skipped += 1
+            continue
+        emb_text = material_embedding_text(m)
+        if not emb_text.strip():
+            skipped += 1
+            continue
+        payload = await compute_embedding(emb_text, settings=cfg, session=session)
+        if payload:
+            m.embedding = payload
+            updated += 1
+        else:
+            skipped += 1
+    if updated:
+        await session.commit()
+    return {"updated": updated, "skipped": skipped, "target_model": target_model}

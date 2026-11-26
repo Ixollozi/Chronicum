@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     max_api_retries: int = 3
 
     storage_path: str = str(PROJECT_ROOT / "data" / "files")
+    max_upload_mb: int = 200
     # Optional: Netscape cookies.txt for Instagram when Meta rate-limits anonymous downloads
     media_cookies_file: str = ""
     # Optional: chrome | firefox | edge — yt-dlp --cookies-from-browser
@@ -166,3 +167,12 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def resolve_storage_root(settings: Settings | None = None) -> Path:
+    """Resolve `storage_path` consistently against PROJECT_ROOT when relative."""
+    cfg = settings or get_settings()
+    root = Path(cfg.storage_path)
+    if not root.is_absolute():
+        root = PROJECT_ROOT / root
+    return root.resolve()
