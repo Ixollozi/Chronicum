@@ -113,9 +113,103 @@ def test_key_cooldown_skips_after_429():
     lim.reset_limits_for_tests()
     lim.set_key_cooldown("env:groq", seconds=30)
     assert lim.key_in_cooldown("env:groq")
+    assert lim.key_cooldown_remaining("env:groq") > 0
     assert lim.is_rate_limit_error("Error 429 rate_limit exceeded")
     lim.clear_key_cooldown("env:groq")
     assert not lim.key_in_cooldown("env:groq")
+    lim.reset_limits_for_tests()
+
+
+def test_parse_retry_after_and_transient_classification():
+    from app.services import ai_limits as lim
+
+    groq_429 = (
+        "Error code: 429 - Rate limit reached for model openai/gpt-oss-120b "
+        "on tokens per minute (TPM): Limit 8000, Used 6193. Please try again in 11.54s."
+    )
+    assert 12.0 <= lim.parse_retry_after_seconds(groq_429) <= 13.0
+    assert lim.is_transient_rate_limit_error(groq_429) is True
+
+    assert lim.parse_retry_after_seconds("Please try again in 1m5s") == 65.0
+    assert lim.is_transient_rate_limit_error("Error code: 401 - invalid api key") is False
+    assert (
+        lim.is_transient_rate_limit_error(
+            "Error code: 429 - Rate limit reached on tokens per day (TPD)"
+        )
+        is False
+    )
+
+
+async def test_with_llm_fallback_waits_out_short_tpm_429(monkeypatch):
+    import asyncio
+    from app import ai as app_ai
+    from app.services import ai_limits as lim
+    from app.services import key_pool as kp
+
+    lim.reset_limits_for_tests()
+    sleeps: list[float] = []
+    orig_sleep = asyncio.sleep
+
+    async def fast_sleep(sec: float):
+        sleeps.append(sec)
+        # Clear cooldown to simulate time passing without slowing the test suite
+        lim.clear_key_cooldown("env:groq")
+        await orig_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    fake_key = kp.PooledKey(
+        id="env:groq", provider="groq", api_key="gsk_test", label=".env", source="env"
+    )
+
+    async def fake_acquire(_session, provider: str):
+        return [fake_key] if provider == "groq" else []
+
+    async def fake_mark(_session, key_id, *, ok: bool, error: str | None = None):
+        if ok:
+            lim.clear_key_cooldown(key_id)
+        elif lim.is_rate_limit_error(error):
+            lim.set_key_cooldown(key_id, seconds=lim.parse_retry_after_seconds(error))
+
+    class DummyClient:
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(kp, "acquire_keys", fake_acquire)
+    monkeypatch.setattr(kp, "mark_key_result", fake_mark)
+    monkeypatch.setattr(app_ai, "_client_for", lambda *a, **kw: DummyClient())
+    monkeypatch.setattr(
+        app_ai, "get_settings", lambda: SimpleNamespace(ai_provider="groq")
+    )
+
+    calls = {"n": 0}
+
+    async def flaky_fn(_client):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise app_ai.RateLimitError(
+                "Error code: 429 - tokens per minute (TPM). Please try again in 8.2s."
+            )
+        return "ok-after-wait"
+
+    res = await app_ai.with_llm_fallback(None, flaky_fn)
+    assert res == "ok-after-wait"
+    assert calls["n"] == 2
+    assert len(sleeps) == 1
+    assert 8.5 <= sleeps[0] <= 10.0
+
+    # Auth 401 error must fail fast without sleeping
+    sleeps.clear()
+
+    async def auth_fail_fn(_client):
+        raise app_ai.RateLimitError("Error code: 401 - invalid api key")
+
+    try:
+        await app_ai.with_llm_fallback(None, auth_fail_fn)
+        assert False, "expected RuntimeError on 401"
+    except RuntimeError as e:
+        assert "All API keys exhausted" in str(e)
+    assert sleeps == []
     lim.reset_limits_for_tests()
 
 

@@ -87,6 +87,19 @@ export default function MaterialPage() {
   const activePolling = m?.processing_status === "queued" || m?.processing_status === "processing";
 
   useEffect(() => {
+    const onFocus = () => void load();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [load]);
+
+  useEffect(() => {
     if (!activePolling) return;
     const t = setInterval(() => {
       void load();

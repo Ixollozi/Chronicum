@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from app.logging_setup import get_logger
@@ -16,9 +17,15 @@ _llm_sem: asyncio.Semaphore | None = None
 WHISPER_CONCURRENCY = 1
 LLM_CONCURRENCY = 2
 DEFAULT_COOLDOWN_SEC = 45.0
+MAX_PARSED_COOLDOWN_SEC = 65.0
 
 # key_id (int|str) → monotonic deadline
 _cooldowns: dict[int | str, float] = {}
+
+_RETRY_MIN_SEC_RE = re.compile(
+    r"(?:try again in|retry[- ]?after[:=\s]+)\s*(?:(\d+)\s*m\s*)?(\d+(?:\.\d+)?)\s*(ms|s|sec|seconds?)?",
+    re.IGNORECASE,
+)
 
 
 def _whisper_semaphore() -> asyncio.Semaphore:
@@ -45,26 +52,71 @@ def reset_limits_for_tests() -> None:
 def set_key_cooldown(key_id: int | str, seconds: float = DEFAULT_COOLDOWN_SEC) -> None:
     until = time.monotonic() + max(1.0, seconds)
     _cooldowns[key_id] = until
-    log.info("key_cooldown", key_id=str(key_id), seconds=seconds)
+    log.info("key_cooldown", key_id=str(key_id), seconds=round(max(1.0, seconds), 2))
 
 
 def clear_key_cooldown(key_id: int | str) -> None:
     _cooldowns.pop(key_id, None)
 
 
-def key_in_cooldown(key_id: int | str) -> bool:
+def key_cooldown_remaining(key_id: int | str) -> float:
     until = _cooldowns.get(key_id)
     if until is None:
-        return False
-    if time.monotonic() >= until:
+        return 0.0
+    remaining = until - time.monotonic()
+    if remaining <= 0:
         _cooldowns.pop(key_id, None)
-        return False
-    return True
+        return 0.0
+    return remaining
+
+
+def key_in_cooldown(key_id: int | str) -> bool:
+    return key_cooldown_remaining(key_id) > 0.0
 
 
 def is_rate_limit_error(error: str | None) -> bool:
     msg = (error or "").lower()
     return any(tok in msg for tok in ("429", "rate limit", "rate_limit", "quota", "too many requests"))
+
+
+def is_transient_rate_limit_error(error: str | None) -> bool:
+    """True for short-lived TPM/RPM 429s worth waiting out; False for 401/auth or daily TPD limits."""
+    msg = (error or "").lower()
+    if not is_rate_limit_error(msg):
+        return False
+    if any(
+        tok in msg
+        for tok in (
+            "401",
+            "invalid api key",
+            "invalid_api_key",
+            "unauthorized",
+            "tokens per day",
+            "(tpd)",
+            "requests per day",
+            "(rpd)",
+            "billing",
+            "insufficient_quota",
+        )
+    ):
+        return False
+    return True
+
+
+def parse_retry_after_seconds(error: str | None, default: float = DEFAULT_COOLDOWN_SEC) -> float:
+    """Extract retry delay from provider 429 message (e.g. Groq 'Please try again in 11.54s')."""
+    if not error:
+        return default
+    m = _RETRY_MIN_SEC_RE.search(error)
+    if not m:
+        return default
+    mins = float(m.group(1) or 0.0)
+    val = float(m.group(2) or 0.0)
+    unit = (m.group(3) or "s").lower()
+    total = mins * 60.0 + (val / 1000.0 if unit == "ms" else val)
+    if total <= 0:
+        return default
+    return min(MAX_PARSED_COOLDOWN_SEC, max(1.0, total + 1.0))
 
 
 async def with_whisper_slot(coro):

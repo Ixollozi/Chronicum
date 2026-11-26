@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import time
 from weakref import WeakKeyDictionary
 
@@ -12,6 +13,13 @@ log = get_logger(__name__)
 _VIDEO_TYPES = frozenset({"youtube", "instagram", "tiktok", "video"})
 _in_flight: dict[str, asyncio.Task] = {}
 _lite_tasks: set[asyncio.Task] = set()
+_watchdog_task: asyncio.Task | None = None
+
+LITE_TEXT_JOB_TIMEOUT_SEC = 300.0
+LITE_VIDEO_JOB_TIMEOUT_SEC = 900.0
+LITE_WATCHDOG_INTERVAL_SEC = 60.0
+LITE_ORPHAN_AFTER_SEC = 30.0
+LITE_STALE_PROCESSING_SEC = 960.0
 
 _job_semaphores: WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[int, asyncio.Semaphore]] = (
     WeakKeyDictionary()
@@ -121,16 +129,38 @@ async def _run_lite_job(material_id: str, force_full: bool = False) -> None:
                         )
                     ).scalars().first()
 
-                if is_video_source(material.source_type):
+                is_vid = is_video_source(material.source_type)
+                timeout_sec = LITE_VIDEO_JOB_TIMEOUT_SEC if is_vid else LITE_TEXT_JOB_TIMEOUT_SEC
+
+                if is_vid:
                     async with _video_semaphore():
-                        material = await _process()
+                        material = await asyncio.wait_for(_process(), timeout=timeout_sec)
                 else:
-                    material = await _process()
+                    material = await asyncio.wait_for(_process(), timeout=timeout_sec)
 
                 if material:
                     from app.workers.settings import notify_material_card
 
                     await notify_material_card(material)
+    except asyncio.TimeoutError:
+        log.error("lite_job_timeout", material_id=material_id)
+        try:
+            async with SessionLocal() as session:
+                material = (
+                    await session.execute(select(Material).where(Material.id == material_id))
+                ).scalars().first()
+                if material and material.processing_status in (
+                    ProcessingStatus.PROCESSING.value,
+                    ProcessingStatus.QUEUED.value,
+                ):
+                    material.processing_status = ProcessingStatus.FAILED.value
+                    material.processing_stage = None
+                    material.error_message = (
+                        "Превышен таймаут обработки. Нажмите «Повторить»."
+                    )
+                    await session.commit()
+        except Exception:
+            log.exception("lite_job_timeout_mark_failed", material_id=material_id)
     except asyncio.CancelledError:
         log.info("lite_job_cancelled", material_id=material_id)
         try:
@@ -291,8 +321,117 @@ async def recover_lite_queue(session_factory=None) -> list[str]:
     return recovered
 
 
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def reap_stale_lite_jobs(
+    session_factory=None,
+    *,
+    orphan_after_sec: float = LITE_ORPHAN_AFTER_SEC,
+    stale_after_sec: float = LITE_STALE_PROCESSING_SEC,
+) -> list[str]:
+    """
+    Periodic Lite-mode watchdog:
+    - Re-enqueues `processing`/`queued` rows that have no live in-flight task after `orphan_after_sec`.
+    - Fails & cancels `processing` rows stuck longer than `stale_after_sec`.
+    """
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Material, ProcessingStage, ProcessingStatus
+
+    factory = session_factory or SessionLocal
+    now = datetime.now(timezone.utc)
+    to_enqueue: list[tuple[str, bool]] = []
+    affected: list[str] = []
+
+    async with factory() as session:
+        rows = (
+            await session.execute(
+                select(Material)
+                .where(
+                    Material.processing_status.in_(
+                        [ProcessingStatus.QUEUED.value, ProcessingStatus.PROCESSING.value]
+                    )
+                )
+                .order_by(Material.created_at.asc())
+            )
+        ).scalars().all()
+        changed = False
+        for m in rows:
+            ts = _as_utc(m.updated_at or m.created_at)
+            age_sec = (now - ts).total_seconds() if ts is not None else stale_after_sec + 1.0
+            task = _in_flight.get(m.id)
+            running = task is not None and not task.done()
+
+            if m.processing_status == ProcessingStatus.PROCESSING.value:
+                if not running and age_sec >= orphan_after_sec:
+                    force = m.processing_stage == ProcessingStage.FULL.value
+                    m.processing_status = ProcessingStatus.QUEUED.value
+                    m.processing_stage = None
+                    m.error_message = None
+                    changed = True
+                    to_enqueue.append((m.id, force))
+                    affected.append(m.id)
+                    log.warning("lite_orphan_processing_reclaimed", material_id=m.id, age_sec=round(age_sec, 1))
+                elif running and age_sec >= stale_after_sec:
+                    if task is not None:
+                        task.cancel()
+                    m.processing_status = ProcessingStatus.FAILED.value
+                    m.processing_stage = None
+                    m.error_message = "Обработка зависла и была остановлена по таймауту. Нажмите «Повторить»."
+                    changed = True
+                    affected.append(m.id)
+                    log.error("lite_stale_processing_failed", material_id=m.id, age_sec=round(age_sec, 1))
+            elif m.processing_status == ProcessingStatus.QUEUED.value:
+                if not running and age_sec >= orphan_after_sec:
+                    force = m.processing_stage == ProcessingStage.FULL.value
+                    to_enqueue.append((m.id, force))
+                    affected.append(m.id)
+                    log.warning("lite_orphan_queued_reenqueued", material_id=m.id, age_sec=round(age_sec, 1))
+
+        if changed:
+            await session.commit()
+
+    for mid, force_full in to_enqueue:
+        await enqueue_material(mid, force_full=force_full)
+
+    return affected
+
+
+def start_lite_watchdog(interval_sec: float = LITE_WATCHDOG_INTERVAL_SEC) -> asyncio.Task:
+    """Start periodic Lite-mode stale-job watchdog if not already running."""
+    global _watchdog_task
+    if _watchdog_task is not None and not _watchdog_task.done():
+        return _watchdog_task
+
+    async def _loop() -> None:
+        while True:
+            await asyncio.sleep(max(1.0, interval_sec))
+            try:
+                await reap_stale_lite_jobs()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.warning("lite_watchdog_tick_failed", error=str(e)[:200])
+
+    _watchdog_task = asyncio.create_task(_loop())
+    return _watchdog_task
+
+
 async def shutdown_lite_queue(timeout: float = 5.0) -> None:
-    """Wait briefly for active Lite tasks on shutdown, then cancel any remaining ones."""
+    """Stop watchdog and wait briefly for active Lite tasks on shutdown, then cancel remaining."""
+    global _watchdog_task
+    if _watchdog_task is not None and not _watchdog_task.done():
+        _watchdog_task.cancel()
+        await asyncio.gather(_watchdog_task, return_exceptions=True)
+    _watchdog_task = None
+
     tasks = [t for t in _in_flight.values() if not t.done()]
     if not tasks:
         return

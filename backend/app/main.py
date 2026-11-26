@@ -25,13 +25,14 @@ async def lifespan(_app: FastAPI):
         log.warning("security_posture_warning", detail=warning)
     if current.is_lite:
         from app.db import init_lite_db
-        from app.services.queue import recover_lite_queue
+        from app.services.queue import recover_lite_queue, start_lite_watchdog
 
         await init_lite_db()
         try:
             await recover_lite_queue()
         except Exception as e:  # noqa: BLE001 — startup must not die on reclaim
             log.warning("startup_reclaim_failed", error=str(e)[:300])
+        start_lite_watchdog()
     else:
         try:
             from app.services.queue import reclaim_and_enqueue

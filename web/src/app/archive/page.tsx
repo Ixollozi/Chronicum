@@ -94,9 +94,12 @@ export default function ArchivePage() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
   const [busyTotal, setBusyTotal] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
   const loadedCountRef = useRef(0);
+  const loadSeqRef = useRef(0);
+  const prevBusyRef = useRef(0);
   const PAGE_SIZE = 50;
 
   useEffect(() => {
@@ -116,6 +119,7 @@ export default function ArchivePage() {
     async (opts?: { silent?: boolean; append?: boolean; offset?: number }) => {
       const append = Boolean(opts?.append);
       const offset = opts?.offset ?? 0;
+      const seq = append ? loadSeqRef.current : ++loadSeqRef.current;
       const limit =
         opts?.silent && !append ? Math.max(PAGE_SIZE, loadedCountRef.current) : PAGE_SIZE;
       if (append) setLoadingMore(true);
@@ -134,6 +138,7 @@ export default function ArchivePage() {
           limit,
           offset,
         });
+        if (!append && seq !== loadSeqRef.current) return;
         setTotal(data.total);
         if (append) {
           setItems((prev) => {
@@ -157,10 +162,11 @@ export default function ArchivePage() {
         }
       } catch (e) {
         if (isAuthError(e)) return;
+        if (!append && seq !== loadSeqRef.current) return;
         setError(e instanceof Error ? e.message : "Ошибка загрузки");
       } finally {
         if (append) setLoadingMore(false);
-        else if (!opts?.silent) setLoading(false);
+        else if (!opts?.silent && seq === loadSeqRef.current) setLoading(false);
       }
     },
     [q, status, category, tag, sourceType, entryKind, minScore, sort]
@@ -172,9 +178,17 @@ export default function ArchivePage() {
       setBusyTotal(b.total);
       return b.total;
     } catch {
-      return 0;
+      return null;
     }
   }, []);
+
+  const hasLocalActive = useMemo(
+    () =>
+      items.some(
+        (i) => i.processing_status === "queued" || i.processing_status === "processing"
+      ),
+    [items]
+  );
 
   useEffect(() => {
     void refreshBusy();
@@ -189,7 +203,7 @@ export default function ArchivePage() {
   }, [refreshBusy]);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   useEffect(() => {
@@ -199,20 +213,36 @@ export default function ArchivePage() {
 
   useEffect(() => {
     let cancelled = false;
-    const tick = async () => {
-      const total = await refreshBusy();
+    const tick = async (forceReload = false) => {
+      const nextBusy = await refreshBusy();
       if (cancelled) return;
-      if (total > 0) {
+      const wasBusy = prevBusyRef.current > 0;
+      const isBusy = (nextBusy ?? 0) > 0;
+      if (nextBusy !== null) {
+        prevBusyRef.current = nextBusy;
+      }
+      const listHasActive = itemsRef.current.some(
+        (i) => i.processing_status === "queued" || i.processing_status === "processing"
+      );
+      if (forceReload || isBusy || wasBusy || listHasActive) {
         await load({ silent: true });
       }
     };
-    const intervalMs = busyTotal > 0 ? 2500 : 8000;
-    const t = setInterval(() => void tick(), intervalMs);
+    const intervalMs = busyTotal > 0 || hasLocalActive ? 2000 : 10000;
+    const t = setInterval(() => void tick(false), intervalMs);
+    const onFocus = () => void tick(true);
+    const onVis = () => {
+      if (document.visibilityState === "visible") void tick(true);
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
     return () => {
       cancelled = true;
       clearInterval(t);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
     };
-  }, [busyTotal, load, refreshBusy]);
+  }, [busyTotal, hasLocalActive, load, refreshBusy]);
 
   const activeItem = useMemo(
     () => items.find((i) => i.id === activeId) ?? null,
@@ -314,6 +344,20 @@ export default function ArchivePage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [moveActive]);
+
+  async function retryItem(id: string) {
+    setRetryingId(id);
+    setError(null);
+    try {
+      await client.retry(id);
+      prevBusyRef.current = Math.max(prevBusyRef.current, 1);
+      await Promise.all([refreshBusy(), load({ silent: true })]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось перезапустить");
+    } finally {
+      setRetryingId(null);
+    }
+  }
 
   async function deleteIds(ids: string[]) {
     if (!ids.length) return;
@@ -602,6 +646,8 @@ export default function ArchivePage() {
           <ArchivePreview
             item={activeItem}
             busy={busy}
+            retrying={retryingId === activeItem?.id}
+            onRetry={(id) => void retryItem(id)}
             onDelete={(id) => deleteIds([id])}
           />
         </aside>
@@ -675,6 +721,19 @@ export default function ArchivePage() {
               <Link href={`/m/${activeItem.id}`} className="archive-sheet-btn primary">
                 Открыть карточку
               </Link>
+              {activeItem.processing_status === "failed" && (
+                <button
+                  type="button"
+                  className="archive-sheet-btn"
+                  disabled={retryingId === activeItem.id}
+                  onClick={() => {
+                    closeSheet();
+                    void retryItem(activeItem.id);
+                  }}
+                >
+                  {retryingId === activeItem.id ? "Повторяю…" : "Повторить"}
+                </button>
+              )}
               {activeItem.source_url && (
                 <a
                   href={activeItem.source_url}

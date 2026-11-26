@@ -208,7 +208,7 @@ class GroqLLMClient(LLMClient):
         self.settings = settings
         self.key_id = key_id
         self.provider = "groq"
-        self.client = AsyncGroq(api_key=api_key)
+        self.client = AsyncGroq(api_key=api_key, timeout=90.0, max_retries=1)
         self.model = settings.groq_llm_model
 
     @retry(
@@ -307,10 +307,13 @@ class GoogleLLMClient(LLMClient):
 
         prompt = f"{system}\n\n{user}"
         try:
-            resp = await asyncio.to_thread(
-                self._generate_sync,
-                prompt,
-                {"temperature": 0.2, "response_mime_type": "application/json"},
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._generate_sync,
+                    prompt,
+                    {"temperature": 0.2, "response_mime_type": "application/json"},
+                ),
+                timeout=90.0,
             )
         except Exception as e:
             msg = str(e).lower()
@@ -332,10 +335,13 @@ class GoogleLLMClient(LLMClient):
 
         prompt = f"{system}\n\n{user}"
         try:
-            resp = await asyncio.to_thread(
-                self._generate_sync,
-                prompt,
-                {"temperature": 0.3},
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._generate_sync,
+                    prompt,
+                    {"temperature": 0.3},
+                ),
+                timeout=90.0,
             )
         except Exception as e:
             msg = str(e).lower()
@@ -351,7 +357,7 @@ class GroqTranscribeClient(TranscribeClient):
 
         self.settings = settings
         self.key_id = key_id
-        self.client = AsyncGroq(api_key=api_key)
+        self.client = AsyncGroq(api_key=api_key, timeout=180.0, max_retries=1)
         self.model = settings.groq_whisper_model
 
     async def aclose(self) -> None:
@@ -420,7 +426,7 @@ class GroqTranscribeClient(TranscribeClient):
     async def _call_transcriptions_api(self, kwargs: dict[str, Any]):
         import asyncio
 
-        from app.services.ai_limits import set_key_cooldown, with_whisper_slot
+        from app.services.ai_limits import parse_retry_after_seconds, set_key_cooldown, with_whisper_slot
 
         current = dict(kwargs)
         transient_attempts = 0
@@ -432,7 +438,7 @@ class GroqTranscribeClient(TranscribeClient):
                 kind = self._classify_api_error(e)
                 if kind == "rate_limit":
                     if self.key_id is not None:
-                        set_key_cooldown(self.key_id)
+                        set_key_cooldown(self.key_id, seconds=parse_retry_after_seconds(str(e)))
                     raise RateLimitError(str(e)) from e
                 if kind == "payload_too_large":
                     raise
@@ -678,9 +684,24 @@ async def get_llm_client_pooled(session) -> LLMClient:
     raise RuntimeError(last_err or "No API keys in pool — add Groq/Gemini in Settings")
 
 
+LLM_RATE_LIMIT_WAIT_ROUNDS = 2
+LLM_MAX_RETRY_WAIT_SEC = 45.0
+
+
 async def with_llm_fallback(session, fn):
-    """Call async fn(client); on RateLimitError try next key/provider and close clients cleanly."""
-    from app.services.ai_limits import with_llm_slot
+    """
+    Call async fn(client); rotate across keys/providers on RateLimitError.
+    If every key hits a short transient TPM/RPM 429, wait out the shortest
+    retry-after window (up to LLM_RATE_LIMIT_WAIT_ROUNDS) before giving up.
+    """
+    import asyncio
+
+    from app.services.ai_limits import (
+        is_transient_rate_limit_error,
+        key_cooldown_remaining,
+        parse_retry_after_seconds,
+        with_llm_slot,
+    )
     from app.services.key_pool import acquire_keys, mark_key_result
 
     settings = get_settings()
@@ -688,23 +709,62 @@ async def with_llm_fallback(session, fn):
     order = [preferred] + [p for p in ("groq", "google") if p != preferred]
     errors: list[str] = []
 
-    for provider in order:
-        keys = await acquire_keys(session, provider)
-        for pk in keys:
-            client = _client_for(provider, pk.api_key, settings, pk.id)
-            try:
-                result = await with_llm_slot(fn(client))
-                await mark_key_result(session, pk.id, ok=True)
-                return result
-            except RateLimitError as e:
-                errors.append(f"{provider}:{pk.id}: {e}")
-                await mark_key_result(session, pk.id, ok=False, error=str(e)[:300])
-                continue
-            finally:
+    for wait_round in range(LLM_RATE_LIMIT_WAIT_ROUNDS + 1):
+        shortest_wait: float | None = None
+        saw_transient = False
+        attempted_any = False
+
+        for provider in order:
+            keys = await acquire_keys(session, provider)
+            for pk in keys:
+                cd_left = key_cooldown_remaining(pk.id)
+                if cd_left > 0 and wait_round < LLM_RATE_LIMIT_WAIT_ROUNDS:
+                    # Key is already cooling down from a recent 429 — don't hammer it prematurely
+                    saw_transient = True
+                    shortest_wait = cd_left if shortest_wait is None else min(shortest_wait, cd_left)
+                    continue
+
+                attempted_any = True
+                client = _client_for(provider, pk.api_key, settings, pk.id)
                 try:
-                    await client.aclose()
-                except Exception:
-                    pass
+                    result = await with_llm_slot(fn(client))
+                    await mark_key_result(session, pk.id, ok=True)
+                    return result
+                except RateLimitError as e:
+                    err_str = str(e)
+                    errors.append(f"{provider}:{pk.id}: {err_str}")
+                    await mark_key_result(session, pk.id, ok=False, error=err_str[:300])
+                    if is_transient_rate_limit_error(err_str):
+                        saw_transient = True
+                        wait_hint = parse_retry_after_seconds(err_str)
+                        shortest_wait = (
+                            wait_hint if shortest_wait is None else min(shortest_wait, wait_hint)
+                        )
+                    continue
+                finally:
+                    try:
+                        await client.aclose()
+                    except Exception:
+                        pass
+
+        if (
+            wait_round < LLM_RATE_LIMIT_WAIT_ROUNDS
+            and saw_transient
+            and shortest_wait is not None
+            and shortest_wait <= LLM_MAX_RETRY_WAIT_SEC
+        ):
+            sleep_for = max(0.5, min(shortest_wait, LLM_MAX_RETRY_WAIT_SEC))
+            log.info(
+                "llm_rate_limit_wait",
+                round=wait_round + 1,
+                wait_seconds=round(sleep_for, 2),
+                attempted_any=attempted_any,
+            )
+            await asyncio.sleep(sleep_for)
+            continue
+
+        break
+
     raise RuntimeError("All API keys exhausted: " + "; ".join(errors[:5]))
 
 

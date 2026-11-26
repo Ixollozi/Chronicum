@@ -13,11 +13,15 @@ import { client, type MaterialDetail, type MaterialListItem } from "@/lib/api";
 export function ArchivePreview({
   item,
   onDelete,
+  onRetry,
   busy,
+  retrying,
 }: {
   item: MaterialListItem | null;
   onDelete?: (id: string) => void;
+  onRetry?: (id: string) => void;
   busy?: boolean;
+  retrying?: boolean;
 }) {
   const [detail, setDetail] = useState<MaterialDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -25,15 +29,19 @@ export function ArchivePreview({
 
   const itemId = item?.id;
   const itemStatus = item?.processing_status;
+  const itemStage = item?.processing_stage;
   const itemTitle = item?.title;
+  const itemSummary = item?.summary;
 
   useEffect(() => {
     if (!itemId) {
       setDetail(null);
       setErr(null);
+      setLoading(false);
       return;
     }
     let cancelled = false;
+    setDetail((prev) => (prev && prev.id === itemId ? prev : null));
     setLoading(true);
     setErr(null);
     client
@@ -50,7 +58,7 @@ export function ArchivePreview({
     return () => {
       cancelled = true;
     };
-  }, [itemId, itemStatus, itemTitle]);
+  }, [itemId, itemStatus, itemStage, itemTitle, itemSummary]);
 
   if (!item) {
     return (
@@ -196,6 +204,16 @@ export function ArchivePreview({
         <Link href={`/m/${item.id}`} className="archive-cta">
           Открыть карточку
         </Link>
+        {currentStatus === "failed" && onRetry && (
+          <button
+            type="button"
+            disabled={retrying || busy}
+            className="card-btn card-btn-accent"
+            onClick={() => onRetry(item.id)}
+          >
+            {retrying ? "Повторяю…" : "Повторить"}
+          </button>
+        )}
         {item.source_url && (
           <a
             href={item.source_url}

@@ -357,12 +357,17 @@ async def acquire_keys(session: AsyncSession, provider: str) -> list[PooledKey]:
 
 
 async def mark_key_result(session: AsyncSession, key_id: int | str, *, ok: bool, error: str | None = None) -> None:
-    from app.services.ai_limits import clear_key_cooldown, is_rate_limit_error, set_key_cooldown
+    from app.services.ai_limits import (
+        clear_key_cooldown,
+        is_rate_limit_error,
+        parse_retry_after_seconds,
+        set_key_cooldown,
+    )
 
     if ok:
         clear_key_cooldown(key_id)
     elif is_rate_limit_error(error):
-        set_key_cooldown(key_id)
+        set_key_cooldown(key_id, seconds=parse_retry_after_seconds(error))
 
     if isinstance(key_id, str):
         return
