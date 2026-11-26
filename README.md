@@ -23,7 +23,7 @@ cd D:\Cursor\Chronicum
 .\scripts\start-lite.ps1
 ```
 
-Откроется http://127.0.0.1:3000 (токен `chronicum-dev-token`).
+Откроется http://127.0.0.1:3000. Вход: **Continue with Google** (нужны `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` в `.env`). Для MCP после логина создай Personal API Token в Настройки → Аккаунт. Локальный Dev token — только при `NEXT_PUBLIC_ALLOW_DEV_TOKEN=1`.
 
 Full-режим (Postgres+Redis): `.\scripts\setup-local.ps1` + `.\scripts\start-local.ps1`.
 
@@ -41,7 +41,7 @@ docker compose up --build -d
 - `/archive` — каталог
 - `/graph` — сеть тегов и категорий
 - `/m/[id]` — карточка
-- `/settings` — режимы, профиль, ключи, **подключение MCP к Cursor**
+- `/settings` — аккаунт (Google + MCP tokens), режимы, профиль, ключи, IDE
 
 ## Bot commands
 

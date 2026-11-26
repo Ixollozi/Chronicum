@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getToken } from "@/lib/api";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8010";
 const TTS_VOICE_KEY = "chronicum_tts_voice";
 
 type TtsVoice = "svetlana" | "dmitry";

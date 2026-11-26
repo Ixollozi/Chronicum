@@ -1,0 +1,12 @@
+[0:00] А вы знали, что если установить в код навык slash брак, тогда вы всего за пару кликов сможете превратить любой ваш проект в пушечный 20-секундный промо-ролик?
+[0:07] Это правда, не дихай!
+[0:09] Окей, находим навык, скачиваем его. Готово.
+[0:45] А если ты не понимаешь, что такое GitHub и хочешь разобраться, то смотри дальше.
+
+[Слайд 1]
+[OCR]
+ПРАВДА ИЛИ ХАЙП brag Code Iss latent-spaces More Watch 15 Fork You built it. Now brag. MIT License 3.6k
+
+[On-screen OCR timed]
+[OCR 0:02] ПРАВДА ИЛИ ХАЙП brag Code Iss github.com/latent-spaces/brag More Watch 15 Fork You built it. Now brag. MIT License 3.6k
+[OCR 0:22] Create PR

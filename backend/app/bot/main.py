@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
@@ -15,14 +14,11 @@ from app.db import SessionLocal
 from app.logging_setup import get_logger, setup_logging
 from app.models import Material, MaterialTag, ProcessingStatus, Tag, TagStatus
 from app.search import answer_question
-from app.services.processing import create_material
+from app.services.processing import create_material, needs_enqueue
 from app.services.queue import enqueue_material
-from app.services.sources import UnsupportedSourceError, classify_url
-from app.services.storage import file_sha256, save_bytes, text_sha256, url_sha256
+from app.services.storage import file_sha256, save_bytes, text_sha256
 
 log = get_logger(__name__)
-
-URL_RE = re.compile(r"https?://\S+", re.I)
 
 
 def _owner_ok(message: Message) -> bool:
@@ -85,7 +81,10 @@ def create_dispatcher() -> Dispatcher:
             "/score <id> <1-10>\n"
             "/approve_tag <tag>\n"
             "/reject_tag <tag>\n"
-            "/pending_tags\n\n"
+            "/pending_tags\n"
+            "/client <имя> <текст> — дописать в тред клиента\n"
+            "/client_context <имя> — сводка по клиенту\n"
+            "/client_new <имя> — создать карточку\n\n"
             f"AI: {'ok' if s.ai_ready else 'нет ключа'} · "
             f"owner_id: {s.telegram_owner_id or 'не задан (открытый доступ)'}"
         )
@@ -104,6 +103,30 @@ def create_dispatcher() -> Dispatcher:
             return
         get_settings.cache_clear()
         s = get_settings()
+        usage = ""
+        try:
+            from datetime import datetime, timezone
+
+            from sqlalchemy import func, select
+
+            from app.models import Material
+
+            soft_limit = 250_000
+            day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            async with SessionLocal() as session:
+                row = (
+                    await session.execute(
+                        select(
+                            func.coalesce(func.sum(Material.usage_tokens_in), 0),
+                            func.coalesce(func.sum(Material.usage_tokens_out), 0),
+                        ).where(Material.updated_at >= day_start)
+                    )
+                ).one()
+                used = int(row[0] or 0) + int(row[1] or 0)
+            lvl = "warn" if used >= soft_limit else "ok"
+            usage = f"\ngroq_tokens_today: {used} ({lvl}, soft={soft_limit})"
+        except Exception:
+            usage = ""
         await message.answer(
             "Chronicum status\n"
             f"telegram_ready: {s.telegram_ready}\n"
@@ -111,6 +134,7 @@ def create_dispatcher() -> Dispatcher:
             f"lite: {s.is_lite}\n"
             f"owner_id: {s.telegram_owner_id}\n"
             f"ai_provider: {s.ai_provider}"
+            f"{usage}"
         )
 
     @dp.message(Command("retry"))
@@ -237,6 +261,109 @@ def create_dispatcher() -> Dispatcher:
             tag_name = tag.name
         await message.answer(f"Rejected tag: {tag_name}")
 
+    @dp.message(Command("client_new"))
+    async def client_new_cmd(message: Message, command: CommandObject) -> None:
+        if not _owner_ok(message):
+            return
+        name = (command.args or "").strip()
+        if not name:
+            await message.answer("Usage: /client_new <имя>")
+            return
+        from app.services.clients import create_client
+
+        async with SessionLocal() as session:
+            c = await create_client(session, display_name=name)
+        await message.answer(f"Клиент создан: {c.display_name}\nid: `{c.id}`")
+
+    @dp.message(Command("client"))
+    async def client_append_cmd(message: Message, command: CommandObject) -> None:
+        if not _owner_ok(message):
+            return
+        raw = (command.args or "").strip()
+        if not raw:
+            await message.answer("Usage: /client <имя|id> <текст сообщения>")
+            return
+        from app.services.clients import AmbiguousClientError, append_message, resolve_client_v2
+
+        async with SessionLocal() as session:
+            # Longest-prefix resolve so multi-word names work: «Иван Петров текст…»
+            chosen = None
+            chosen_text = ""
+            words = raw.split()
+            for cut in range(len(words) - 1, 0, -1):
+                who_try = " ".join(words[:cut])
+                res = await resolve_client_v2(session, who_try)
+                if res["status"] == "ambiguous":
+                    names = "\n".join(
+                        f"• {c['display_name']} ({c['id'][:8]}…) — {c.get('context_line') or ''}"
+                        for c in res["candidates"]
+                    )
+                    await message.answer(f"Неоднозначно, уточни id:\n{names}")
+                    return
+                if res["client"]:
+                    chosen = res["client"]
+                    chosen_text = " ".join(words[cut:])
+                    break
+            if not chosen or not chosen_text:
+                await message.answer("Клиент не найден или нет текста. Usage: /client <имя|id> <текст>")
+                return
+            c, _msg = await append_message(session, chosen.id, chosen_text, source="tg", refresh_summary=False)
+        await message.answer(f"Дописано → {c.display_name} ({c.id[:8]}…)")
+
+    @dp.message(Command("client_summary"))
+    async def client_summary_cmd(message: Message, command: CommandObject) -> None:
+        if not _owner_ok(message):
+            return
+        who = (command.args or "").strip()
+        if not who:
+            await message.answer("Usage: /client_summary <имя|id>")
+            return
+        from app.services.clients import AmbiguousClientError, refresh_client_summary, resolve_client
+
+        async with SessionLocal() as session:
+            try:
+                c0 = await resolve_client(session, who)
+            except AmbiguousClientError as e:
+                names = "\n".join(f"• {c['display_name']} ({c['id'][:8]}…)" for c in e.candidates)
+                await message.answer(f"Неоднозначно:\n{names}")
+                return
+            if not c0:
+                await message.answer(f"Клиент не найден: {who}")
+                return
+            c = await refresh_client_summary(session, c0.id)
+        await message.answer(f"Сводка обновлена (v{c.summary_version}): {c.display_name}")
+
+    @dp.message(Command("client_context"))
+    async def client_context_cmd(message: Message, command: CommandObject) -> None:
+        if not _owner_ok(message):
+            return
+        who = (command.args or "").strip()
+        if not who:
+            await message.answer("Usage: /client_context <имя|id>")
+            return
+        from app.services.clients import AmbiguousClientError, client_context_pack
+
+        async with SessionLocal() as session:
+            try:
+                pack = await client_context_pack(session, who, n=8)
+            except AmbiguousClientError as e:
+                names = "\n".join(f"• {c['display_name']} ({c['id'][:8]}…)" for c in e.candidates)
+                await message.answer(f"Неоднозначно:\n{names}")
+                return
+            except ValueError:
+                await message.answer(f"Клиент не найден: {who}")
+                return
+        cl = pack["client"]
+        stale_note = ""
+        if cl.get("summary_stale"):
+            stale_note = f"\n(сводка устарела: +{cl.get('messages_since_summary')} новых сообщений)"
+        summary = (cl.get("summary") or "(сводки ещё нет — /client … затем обнови в вебе)").strip()
+        recent = pack.get("recent_messages") or []
+        tail = "\n".join(f"• {(m.get('body') or '')[:120]}" for m in recent[-5:])
+        await message.answer(
+            f"{cl.get('display_name')} ({cl.get('id')}){stale_note}\n\n{summary[:2500]}\n\nПоследние:\n{tail or '—'}"
+        )
+
     @dp.callback_query(F.data.startswith("pf:"))
     async def cb_process_full(cb: CallbackQuery) -> None:
         if not _owner_cb(cb):
@@ -334,7 +461,7 @@ def create_dispatcher() -> Dispatcher:
         path = save_bytes(raw, ".ogg")
         content_hash = file_sha256(path)
         async with SessionLocal() as session:
-            m = await create_material(
+            out = await create_material(
                 session,
                 source_type="voice",
                 file_path=path,
@@ -342,10 +469,16 @@ def create_dispatcher() -> Dispatcher:
                 user_id=message.from_user.id if message.from_user else None,
                 chat_id=message.chat.id,
             )
-        if m.processing_status == ProcessingStatus.DONE.value:
+            m = out.material
+            if out.already_exists and m.processing_status == ProcessingStatus.FAILED.value:
+                m.processing_status = ProcessingStatus.QUEUED.value
+                m.error_message = None
+                await session.commit()
+        if out.already_exists and not needs_enqueue(m, out.already_exists):
             await message.answer(f"Already exists:\n{card_short(m)}")
             return
-        await enqueue(m.id)
+        if needs_enqueue(m, out.already_exists):
+            await enqueue(m.id)
         await message.answer(f"Принято (voice), в очереди.\nid: `{m.id}`")
 
     @dp.message(F.photo | F.document)
@@ -385,7 +518,7 @@ def create_dispatcher() -> Dispatcher:
 
         content_hash = file_sha256(path)
         async with SessionLocal() as session:
-            m = await create_material(
+            out = await create_material(
                 session,
                 source_type=source_type,
                 file_path=path,
@@ -393,10 +526,16 @@ def create_dispatcher() -> Dispatcher:
                 user_id=message.from_user.id if message.from_user else None,
                 chat_id=message.chat.id,
             )
-        if m.processing_status == ProcessingStatus.DONE.value and m.summary:
+            m = out.material
+            if out.already_exists and m.processing_status == ProcessingStatus.FAILED.value:
+                m.processing_status = ProcessingStatus.QUEUED.value
+                m.error_message = None
+                await session.commit()
+        if out.already_exists and not needs_enqueue(m, out.already_exists):
             await message.answer(f"Already exists:\n{card_short(m)}")
             return
-        await enqueue(m.id)
+        if needs_enqueue(m, out.already_exists):
+            await enqueue(m.id)
         await message.answer(f"Принято ({source_type}), в очереди.\nid: `{m.id}`")
 
     @dp.message(F.video | F.video_note)
@@ -412,7 +551,7 @@ def create_dispatcher() -> Dispatcher:
         path = save_bytes(raw, ".mp4")
         content_hash = file_sha256(path)
         async with SessionLocal() as session:
-            m = await create_material(
+            out = await create_material(
                 session,
                 source_type="video",
                 file_path=path,
@@ -420,10 +559,16 @@ def create_dispatcher() -> Dispatcher:
                 user_id=message.from_user.id if message.from_user else None,
                 chat_id=message.chat.id,
             )
-        if m.summary and m.processing_status == ProcessingStatus.DONE.value:
+            m = out.material
+            if out.already_exists and m.processing_status == ProcessingStatus.FAILED.value:
+                m.processing_status = ProcessingStatus.QUEUED.value
+                m.error_message = None
+                await session.commit()
+        if out.already_exists and not needs_enqueue(m, out.already_exists):
             await message.answer(f"Already exists:\n{card_short(m)}")
             return
-        await enqueue(m.id)
+        if needs_enqueue(m, out.already_exists):
+            await enqueue(m.id)
         await message.answer(f"Принято (video), в очереди.\nid: `{m.id}`")
 
     @dp.message(F.text)
@@ -438,34 +583,23 @@ def create_dispatcher() -> Dispatcher:
             ("как ", "что ", "зачем ", "почему ", "where ", "what ", "how ", "найди", "search")
         )
 
-        url_match = URL_RE.search(text)
-        mostly_url = bool(url_match) and (
-            text.strip() == url_match.group(0) or (len(text) < 400 and not is_question)
-        )
-        if mostly_url and url_match:
+        from app.services.composer import extract_urls, run_composer, _url_paste_only
+
+        urls = extract_urls(text)
+        if urls and _url_paste_only(text, urls) and not is_question:
             if not await _need_ai(message):
                 return
-            url = url_match.group(0).rstrip(").,]")
             try:
-                source_type = classify_url(url)
-            except UnsupportedSourceError as e:
+                async with SessionLocal() as session:
+                    result = await run_composer(session, text, mode="knowledge")
+            except ValueError as e:
                 await message.answer(str(e))
                 return
-            content_hash = url_sha256(url)
-            async with SessionLocal() as session:
-                m = await create_material(
-                    session,
-                    source_type=source_type,
-                    source_url=url,
-                    content_hash=content_hash,
-                    user_id=message.from_user.id if message.from_user else None,
-                    chat_id=message.chat.id,
-                )
-            if m.summary and m.processing_status == ProcessingStatus.DONE.value:
-                await message.answer(f"Already exists:\n{card_short(m)}")
-                return
-            await enqueue(m.id)
-            await message.answer(f"Принято ({source_type}), в очереди.\nid: `{m.id}`")
+            lines = [result.message]
+            for it in result.items or []:
+                mark = "·" if it.get("already_exists") else "+"
+                lines.append(f"{mark} `{it['id']}`")
+            await message.answer("\n".join(lines)[:4000])
             return
 
         if is_question or len(text) > 280:
@@ -480,7 +614,7 @@ def create_dispatcher() -> Dispatcher:
             return
         content_hash = text_sha256(text)
         async with SessionLocal() as session:
-            m = await create_material(
+            out = await create_material(
                 session,
                 source_type="note",
                 note_text=text,
@@ -489,10 +623,16 @@ def create_dispatcher() -> Dispatcher:
                 chat_id=message.chat.id,
                 title=text[:80],
             )
-        if m.summary and m.processing_status == ProcessingStatus.DONE.value:
+            m = out.material
+            if out.already_exists and m.processing_status == ProcessingStatus.FAILED.value:
+                m.processing_status = ProcessingStatus.QUEUED.value
+                m.error_message = None
+                await session.commit()
+        if out.already_exists and not needs_enqueue(m, out.already_exists):
             await message.answer(f"Already exists:\n{card_short(m)}")
             return
-        await enqueue(m.id)
+        if needs_enqueue(m, out.already_exists):
+            await enqueue(m.id)
         await message.answer(f"Принято (note), в очереди.\nid: `{m.id}`")
 
     return dp

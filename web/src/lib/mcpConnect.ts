@@ -1,10 +1,11 @@
 export const IDE_RULE = `Chronicum — единая база знаний пользователя.
 Когда этот MCP подключён, не ищи правила и скиллы в папках проекта.
 Сначала вызови search (или list_materials). Карточку читай через get_material: summary → card → full.
-Новые правила и заметки клади add_note / add_url, а не в .md репозитория.`
+Новые правила и заметки клади add_note / add_url, а не в .md репозитория.
+Токен MCP — Personal API Token из Chronicum (Настройки → IDE) после Google login. Google OAuth в MCP не открывается.`
 
 export function apiOrigin(): string {
-  const raw = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"
+  const raw = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8010"
   return raw.replace(/\/$/, "").replace("localhost", "127.0.0.1")
 }
 

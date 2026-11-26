@@ -1,0 +1,6 @@
+[0:00] Today I will show three open source tools for analytics and dashboards that save hours every week.
+[0:20] First tool is Rybbit, second is BoardUI, check the links below and try them today.
+
+[On-screen OCR timed]
+[OCR 0:05] rybbit-io/rybbit
+[OCR 0:12] BoardUI/boardui

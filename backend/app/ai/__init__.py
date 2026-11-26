@@ -19,7 +19,7 @@ Return ONLY valid JSON (no markdown fences) with this exact shape:
   "title": "string",
   "summary": "2-3 sentences: context + hook + CTA if any. Do NOT enumerate every step.",
   "main_idea": "1 thesis why this is worth saving — NOT a copy of the step list",
-  "digest": "3-7 actionable bullets as one string with newlines; EACH bullet should name concrete tools/sites from the material or SCREEN RESOURCES when present; max ~800 chars",
+  "digest": "3-7 actionable bullets as one string with newlines; bullets name concrete tools/sites ONLY when literally present in the material or SCREEN RESOURCES; never add a tool just to fill a bullet; max ~800 chars",
   "key_ideas": ["2-4 abstract principles — MUST NOT paraphrase digest bullets"],
   "practical_takeaways": ["do X via Y — each item names a concrete tool/service"],
   "tools": ["named tools/apps from speech OR screen"],
@@ -44,7 +44,14 @@ FIELD ROLES (anti-duplication — critical):
 - key_ideas = principles (\"B-roll must match speech\"), NOT repeating \"Шаг 1… Шаг 2…\".
 - If SCREEN RESOURCES lists brands, put them in tools and mention ≥2 in digest.
 - Listicle / \"N tips\" without unique numbers/playbook → actionability ≤ 3.
-- links: real URLs mentioned in speech/OCR/screen (or well-known official pages when the material clearly points to them). title in Russian. Prefer objects; bare URL strings also OK. Do NOT put brand names without URLs here — those belong in tools.
+- End-of-video CTA (Telegram / subscribe / channel promo) is NOT a listicle item — do not put CTA into tools, links, or digest bullets as another \"project\".
+- Shallow promo listicle (many names, no procedure) → keep actionability ≤ 3; expect calibrated score around 6–7, never 8+.
+- links: ONLY URLs literally present in speech/OCR/caption/screen text (character-for-character as seen/heard). NEVER construct a URL from a brand name, never add «well-known official pages» (no claude.ai / notion.so / reddit.com unless that exact URL is in the material). If a repo/site is only NAMED («ссылку пришлю в комментариях», «выложил на гитхабе»), links stays EMPTY — put the product in tools instead; the system resolves its repo online and verifies it server-side. NEVER guess owner/repo («github.com/someuser/...») yourself. title in Russian. Do NOT put brand names without URLs here — those belong in tools.
+- tools: ONLY real software/products the viewer would open, install or run, and that are literally named in speech/OCR/caption. NEVER copy OCR gibberish — Latinized-Russian nonsense tokens («MupyioTcyHaoc», «FalCup», «TenbHblenpewMyuec») are OCR noise, not product names. Content platforms used as placement channels (Reddit, Wikipedia, Хабр, DTF) are NOT tools — describe them in digest instead. Max 8 tools.
+- NEGATION: a tool presented as rejected/replaced/crossed-out («не открывая After Effects», «not one frame in After Effects», «вместо X») is an ANTI-example — do NOT put it in tools; you may mention «без X» in digest.
+- Do NOT invent secondary workflows absent from speech/OCR (e.g. «use Claude to rewrite scripts») — only tools actually shown or spoken. Every digest bullet must be traceable to a specific speech line / OCR text / caption — no added editors, libraries, sites or steps (no Notion, p5.js, Three.js, CapCut unless literally named).
+- Do NOT invent model versions, numbers or CTAs not in the material («Claude Opus 5.5» only if literally said/shown; no generic «подписывайтесь» closers in summary unless the author says it).
+- If SCREEN RESOURCES names a scanner/product (SkillSpector, Rybbit, …), that product MUST appear in tools; logo-only OCR brands that never appear in speech should NOT dominate tools/digest.
 - code_blocks: ONLY when the material includes or clearly dictates copy-pasteable light code (CSS/JS/Python/bash/SQL snippets, short functions, commands). Keep each block ≤ ~40 lines. language must match content. Empty [] when there is no code. Do NOT invent full apps or tutorials not in the source.
 
 QUALITY RUBRIC (rate the 4 quality signals independently of the person):
@@ -324,94 +331,103 @@ class GroqTranscribeClient(TranscribeClient):
         self.model = settings.groq_whisper_model
 
     async def transcribe(self, path: str, language: str | None = None) -> TranscribeResult:
-        from pathlib import Path
+        from app.services.ai_limits import set_key_cooldown, with_whisper_slot
 
-        try:
-            p = Path(path)
-            data = p.read_bytes()
-            # None → settings.whisper_language; "auto" → let Whisper detect (fixes EN tutorials forced to RU)
-            cfg_lang = (getattr(self.settings, "whisper_language", None) or "auto").strip().lower()
-            lang = (language if language is not None else cfg_lang).strip().lower() or "auto"
-            kwargs: dict[str, Any] = {
-                "file": (p.name, data),
-                "model": self.model,
-                "response_format": "verbose_json",
-                "timestamp_granularities": ["segment"],
-                "temperature": 0,
-            }
-            if lang != "auto":
-                kwargs["language"] = lang
-            if lang == "ru":
-                kwargs["prompt"] = (
-                    "Транскрипция разговорной русской речи. "
-                    "Пиши дословно, сохраняй мат, сленг и междометия. "
-                    "Не цензурируй и не заменяй слова звёздочками или эвфемизмами. "
-                    "Названия продуктов оставляй как есть: CapCut, overlay, keyframe, opacity."
-                )
-            elif lang == "en":
-                kwargs["prompt"] = (
-                    "Transcribe spoken English faithfully. Keep UI/product terms as CapCut, "
-                    "overlay, keyframe, opacity, layer, timeline, blend."
-                )
-            else:
-                kwargs["prompt"] = (
-                    "Transcribe faithfully in the spoken language. Keep product/UI names: "
-                    "CapCut, overlay, keyframe, opacity, layer, timeline. "
-                    "Do not translate technical UI terms into unrelated words."
-                )
+        async def _run() -> TranscribeResult:
+            from pathlib import Path
+
             try:
-                resp = await self.client.audio.transcriptions.create(**kwargs)
-            except Exception:
-                # Older API / models may reject timestamp_granularities or prompt
-                kwargs.pop("timestamp_granularities", None)
+                p = Path(path)
+                data = p.read_bytes()
+                # None → settings.whisper_language; "auto" → let Whisper detect (fixes EN tutorials forced to RU)
+                cfg_lang = (getattr(self.settings, "whisper_language", None) or "auto").strip().lower()
+                lang = (language if language is not None else cfg_lang).strip().lower() or "auto"
+                kwargs: dict[str, Any] = {
+                    "file": (p.name, data),
+                    "model": self.model,
+                    "response_format": "verbose_json",
+                    "timestamp_granularities": ["segment"],
+                    "temperature": 0,
+                }
+                if lang != "auto":
+                    kwargs["language"] = lang
+                if lang == "ru":
+                    kwargs["prompt"] = (
+                        "Транскрипция разговорной русской речи. "
+                        "Пиши дословно, сохраняй мат, сленг и междометия. "
+                        "Не цензурируй и не заменяй слова звёздочками или эвфемизмами. "
+                        "Названия продуктов оставляй как есть: CapCut, overlay, keyframe, opacity."
+                    )
+                elif lang == "en":
+                    kwargs["prompt"] = (
+                        "Transcribe spoken English faithfully. Keep UI/product terms as CapCut, "
+                        "overlay, keyframe, opacity, layer, timeline, blend."
+                    )
+                else:
+                    kwargs["prompt"] = (
+                        "Transcribe faithfully in the spoken language. Keep product/UI names: "
+                        "CapCut, overlay, keyframe, opacity, layer, timeline. "
+                        "Do not translate technical UI terms into unrelated words."
+                    )
                 try:
                     resp = await self.client.audio.transcriptions.create(**kwargs)
                 except Exception:
-                    kwargs.pop("prompt", None)
-                    resp = await self.client.audio.transcriptions.create(**kwargs)
-        except Exception as e:
-            msg = str(e).lower()
-            if "401" in msg or "invalid api key" in msg:
-                raise RateLimitError(str(e)) from e
-            if "429" in msg or "rate limit" in msg:
-                raise RateLimitError(str(e)) from e
-            raise
+                    # Older API / models may reject timestamp_granularities or prompt
+                    kwargs.pop("timestamp_granularities", None)
+                    try:
+                        resp = await self.client.audio.transcriptions.create(**kwargs)
+                    except Exception:
+                        kwargs.pop("prompt", None)
+                        resp = await self.client.audio.transcriptions.create(**kwargs)
+            except Exception as e:
+                msg = str(e).lower()
+                if "401" in msg or "invalid api key" in msg:
+                    if self.key_id is not None:
+                        set_key_cooldown(self.key_id)
+                    raise RateLimitError(str(e)) from e
+                if "429" in msg or "rate limit" in msg:
+                    if self.key_id is not None:
+                        set_key_cooldown(self.key_id)
+                    raise RateLimitError(str(e)) from e
+                raise
 
-        text = getattr(resp, "text", "") or ""
-        duration = float(getattr(resp, "duration", 0) or 0)
-        segments: list[TranscriptSegment] = []
-        raw_segs = getattr(resp, "segments", None) or []
-        for s in raw_segs:
-            if isinstance(s, dict):
-                start = float(s.get("start") or 0)
-                end = float(s.get("end") or start)
-                seg_text = str(s.get("text") or "").strip()
-            else:
-                start = float(getattr(s, "start", 0) or 0)
-                end = float(getattr(s, "end", start) or start)
-                seg_text = str(getattr(s, "text", "") or "").strip()
-            if seg_text:
-                segments.append(TranscriptSegment(start=start, end=end, text=seg_text))
+            text = getattr(resp, "text", "") or ""
+            duration = float(getattr(resp, "duration", 0) or 0)
+            segments: list[TranscriptSegment] = []
+            raw_segs = getattr(resp, "segments", None) or []
+            for s in raw_segs:
+                if isinstance(s, dict):
+                    start = float(s.get("start") or 0)
+                    end = float(s.get("end") or start)
+                    seg_text = str(s.get("text") or "").strip()
+                else:
+                    start = float(getattr(s, "start", 0) or 0)
+                    end = float(getattr(s, "end", start) or start)
+                    seg_text = str(getattr(s, "text", "") or "").strip()
+                if seg_text:
+                    segments.append(TranscriptSegment(start=start, end=end, text=seg_text))
 
-        if segments:
-            timed_lines = []
-            for seg in segments:
-                m, sec = divmod(int(seg.start), 60)
-                timed_lines.append(f"[{m}:{sec:02d}] {seg.text}")
-            text = "\n".join(timed_lines)
+            if segments:
+                timed_lines = []
+                for seg in segments:
+                    m, sec = divmod(int(seg.start), 60)
+                    timed_lines.append(f"[{m}:{sec:02d}] {seg.text}")
+                text = "\n".join(timed_lines)
 
-        detected = getattr(resp, "language", None)
-        if detected is not None:
-            detected = str(detected).strip().lower() or None
+            detected = getattr(resp, "language", None)
+            if detected is not None:
+                detected = str(detected).strip().lower() or None
 
-        return TranscribeResult(
-            text=text,
-            audio_seconds=duration,
-            provider="groq",
-            model=self.model,
-            language=detected,
-            segments=segments,
-        )
+            return TranscribeResult(
+                text=text,
+                audio_seconds=duration,
+                provider="groq",
+                model=self.model,
+                language=detected,
+                segments=segments,
+            )
+
+        return await with_whisper_slot(_run())
 
 
 def _client_for(provider: str, api_key: str, settings: Settings, key_id: int | str | None) -> LLMClient:
@@ -442,6 +458,7 @@ async def get_llm_client_pooled(session) -> LLMClient:
 
 async def with_llm_fallback(session, fn):
     """Call async fn(client); on RateLimitError try next key/provider."""
+    from app.services.ai_limits import with_llm_slot
     from app.services.key_pool import acquire_keys, mark_key_result
 
     settings = get_settings()
@@ -454,7 +471,7 @@ async def with_llm_fallback(session, fn):
         for pk in keys:
             client = _client_for(provider, pk.api_key, settings, pk.id)
             try:
-                result = await fn(client)
+                result = await with_llm_slot(fn(client))
                 await mark_key_result(session, pk.id, ok=True)
                 return result
             except RateLimitError as e:
@@ -511,6 +528,8 @@ async def analyze_material(
     personal_profile: dict | None = None,
     screen_resources: str = "",
     entry_kind: str = "knowledge",
+    speech_weak: bool = False,
+    speech_offtopic: bool = False,
 ) -> LLMResult:
     settings = settings or get_settings()
     kind = (entry_kind or "knowledge").strip().lower()
@@ -550,6 +569,23 @@ async def analyze_material(
         "Reuse existing tag strings exactly when they fit. "
         "Be a strict reviewer on usefulness_signals — generosity and ignoring the personal profile make the archive useless."
     )
+    if speech_weak:
+        system += (
+            "\n\nSPEECH_WEAK: Spoken transcript is missing or Whisper hallucination. "
+            "Use caption + on-screen OCR / SCREEN RESOURCES only. "
+            "Do NOT invent spoken steps or dialogue. digest: at most 3 short bullets grounded in caption/OCR; "
+            "actionability ≤ 3; usefulness_score after calibration will be low-to-mid — keep signals honest."
+        )
+    elif speech_offtopic:
+        system += (
+            "\n\nSPEECH_OFFTOPIC: Spoken audio does not match the on-screen topic "
+            "(ad jingle / music bed / unrelated voiceover). "
+            "Ignore spoken lyrics for tools and digest. "
+            "Use caption + on-screen OCR / SCREEN RESOURCES brands only. "
+            "Do NOT invent workflows (e.g. After Effects steps) from the audio. "
+            "digest: at most 3 short bullets grounded in caption/OCR brands and CTA; "
+            "actionability ≤ 3; keep usefulness honest and low-to-mid."
+        )
     res_block = (screen_resources or "").strip()
     user = (
         f"{res_block}\n\nMaterial text:\n\n{raw_text[:120000]}"
@@ -563,8 +599,10 @@ async def analyze_material(
 
         result = await with_llm_fallback(session, _run)
     else:
+        from app.services.ai_limits import with_llm_slot
+
         client = get_llm_client(settings)
-        result = await client.complete_json(system, user)
+        result = await with_llm_slot(client.complete_json(system, user))
 
     log.info(
         "ai_analysis_done",

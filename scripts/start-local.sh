@@ -33,9 +33,12 @@ cd "$ROOT"
 
 : > logs/local.pids
 
+API_PORT="${CHRONICUM_API_PORT:-8010}"
+export NEXT_PUBLIC_API_URL="http://127.0.0.1:${API_PORT}"
+
 (
   cd backend
-  uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+  uvicorn app.main:app --reload --host 127.0.0.1 --port "$API_PORT"
 ) >logs/api.out.log 2>logs/api.err.log &
 echo $! >> logs/local.pids
 
@@ -59,5 +62,5 @@ echo $! >> logs/local.pids
 
 echo "Chronicum started:"
 echo "  Web  http://127.0.0.1:3000"
-echo "  API  http://127.0.0.1:8000/health"
+echo "  API  http://127.0.0.1:${API_PORT}/health"
 echo "  Stop ./scripts/stop-local.sh"

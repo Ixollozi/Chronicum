@@ -54,7 +54,9 @@ function Start-LoggedProcess($Name, $FilePath, $ArgumentList, $WorkDir) {
 }
 
 $procs = @()
-$procs += Start-LoggedProcess "api" $venvPython @("-m", "uvicorn", "app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8000") (Join-Path $Root "backend")
+$apiPort = if ($env:CHRONICUM_API_PORT) { $env:CHRONICUM_API_PORT } else { "8010" }
+$env:NEXT_PUBLIC_API_URL = "http://127.0.0.1:$apiPort"
+$procs += Start-LoggedProcess "api" $venvPython @("-m", "uvicorn", "app.main:app", "--reload", "--host", "127.0.0.1", "--port", $apiPort) (Join-Path $Root "backend")
 $procs += Start-LoggedProcess "worker" $venvPython @("-m", "arq", "app.workers.settings.WorkerSettings") (Join-Path $Root "backend")
 $procs += Start-LoggedProcess "bot" $venvPython @("-m", "app.bot.main") (Join-Path $Root "backend")
 
@@ -69,7 +71,7 @@ $procs | ForEach-Object { $_.Id } | Set-Content (Join-Path $Root "logs\local.pid
 Write-Host ""
 Write-Host "Chronicum is starting:" -ForegroundColor Green
 Write-Host "  Web   http://127.0.0.1:3000"
-Write-Host "  API   http://127.0.0.1:8000/health"
+Write-Host "  API   http://127.0.0.1:$apiPort/health"
 Write-Host "  Logs  $Root\logs\*.log"
 Write-Host "  Stop  .\scripts\stop-local.ps1"
 Write-Host ""

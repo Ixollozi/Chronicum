@@ -25,7 +25,20 @@ def _make_engine():
             path.parent.mkdir(parents=True, exist_ok=True)
             url = f"sqlite+aiosqlite:///{path.as_posix()}"
         kwargs = {"connect_args": {"check_same_thread": False}}
-    return create_async_engine(url, **kwargs)
+    eng = create_async_engine(url, **kwargs)
+    if url.startswith("sqlite"):
+        from sqlalchemy import event
+
+        @event.listens_for(eng.sync_engine, "connect")
+        def _sqlite_on_connect(dbapi_conn, _connection_record):  # noqa: ANN001
+            # WAL + busy timeout: several lite jobs can write without serializing the whole queue
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.close()
+
+    return eng
 
 
 settings = get_settings()

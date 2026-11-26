@@ -165,11 +165,38 @@ async def test_bearer_middleware_rejects():
     scope = {
         "type": "http",
         "method": "POST",
-        "headers": [(b"authorization", b"Bearer wrong")],
+        "headers": [],
         "path": "/mcp",
     }
     await app(scope, receive, send)
     assert sent[0]["status"] == 401
+
+
+@pytest.mark.asyncio
+async def test_bearer_middleware_forwards_personal_token():
+    """Non-matching Bearer (PAT/JWT) is accepted here; API validates ownership."""
+
+    async def dummy(scope, receive, send):
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    app = BearerAuthMiddleware(dummy, "secret-token")
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "headers": [(b"authorization", b"Bearer chr_personal_token")],
+        "path": "/mcp",
+    }
+    await app(scope, receive, send)
+    assert sent[0]["status"] == 204
 
 
 @pytest.mark.asyncio

@@ -23,8 +23,12 @@ export function ArchivePreview({
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  const itemId = item?.id;
+  const itemStatus = item?.processing_status;
+  const itemTitle = item?.title;
+
   useEffect(() => {
-    if (!item) {
+    if (!itemId) {
       setDetail(null);
       setErr(null);
       return;
@@ -33,7 +37,7 @@ export function ArchivePreview({
     setLoading(true);
     setErr(null);
     client
-      .getMaterial(item.id)
+      .getMaterial(itemId)
       .then((d) => {
         if (!cancelled) setDetail(d);
       })
@@ -46,7 +50,7 @@ export function ArchivePreview({
     return () => {
       cancelled = true;
     };
-  }, [item?.id]);
+  }, [itemId, itemStatus, itemTitle]);
 
   if (!item) {
     return (
@@ -64,6 +68,7 @@ export function ArchivePreview({
     );
   }
 
+  const currentStatus = detail?.processing_status ?? item.processing_status;
   const source = SOURCE_LABEL[item.source_type] || item.source_type;
   const category = cleanMetaPart(item.category);
   const dateLabel = formatShortDate(item.created_at);
@@ -75,7 +80,12 @@ export function ArchivePreview({
   return (
     <div className="lib-preview flex h-full min-h-0 flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] px-5 py-3.5">
-        <StatusPill status={item.processing_status} />
+        <StatusPill status={currentStatus} />
+        {(detail?.trust_level || item.trust_level) && (
+          <span className="archive-chip-meta" title={`confidence ${detail?.analysis_confidence ?? item.analysis_confidence ?? "—"}`}>
+            {detail?.trust_level || item.trust_level}
+          </span>
+        )}
         <span className="archive-chip-meta">{source}</span>
         {category && <span className="archive-chip-meta">{category}</span>}
         {dateLabel && <span className="text-[11px] text-[var(--muted)]">{dateLabel}</span>}
@@ -116,11 +126,19 @@ export function ArchivePreview({
           <p className="mt-5 text-sm text-[var(--warn)]">{err}</p>
         ) : (
           <>
-            {digest && (
+            {digest ? (
               <p className="mt-4 text-[0.98rem] leading-relaxed text-[color-mix(in_srgb,var(--ink)_88%,var(--muted))]">
                 {digest}
               </p>
-            )}
+            ) : currentStatus === "failed" ? (
+              <p className="mt-4 rounded-xl border border-[color-mix(in_srgb,var(--warn)_35%,var(--line))] bg-[color-mix(in_srgb,var(--warn)_8%,transparent)] p-3.5 text-sm leading-relaxed text-[var(--warn)]">
+                {detail?.error_message || "Не удалось разобрать материал. Откройте карточку и нажмите «Повторить»."}
+              </p>
+            ) : currentStatus === "queued" || currentStatus === "processing" ? (
+              <p className="mt-4 text-sm leading-relaxed text-[var(--muted)]">
+                {currentStatus === "queued" ? "Материал в очереди на обработку…" : "Материал сейчас обрабатывается…"}
+              </p>
+            ) : null}
 
             {detail?.usefulness_reason && (
               <p className="mt-5 border-l-2 border-[var(--accent)] pl-3.5 text-sm leading-relaxed text-[var(--muted)]">

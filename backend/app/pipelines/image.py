@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytesseract
-from PIL import Image
-
 from app.config import get_settings
 from app.logging_setup import get_logger
 
@@ -14,8 +11,9 @@ log = get_logger(__name__)
 async def extract_image_text(path: str) -> str:
     def _ocr() -> str:
         try:
-            img = Image.open(path)
-            return pytesseract.image_to_string(img).strip()
+            from app.services.local_ocr import ocr_image_file
+
+            return ocr_image_file(path)
         except Exception as e:
             log.warning("image_ocr_failed", path=path, error=str(e)[:300])
             return ""
@@ -25,13 +23,14 @@ async def extract_image_text(path: str) -> str:
     if ocr_text:
         parts.append(f"[OCR]\n{ocr_text}")
 
-    # Vision if OCR empty/thin (screenshots without selectable text)
-    if len(ocr_text) < 40:
-        from app.ai.vision import describe_image
+    # Vision transcription when OCR is thin/garbled (RapidOCR mangles Cyrillic
+    # on designed slides — vision reads them exactly, URLs included)
+    if len(ocr_text) < 120:
+        from app.ai.vision import transcribe_image_text
 
-        desc = await describe_image(path, get_settings())
-        if desc:
-            parts.append(f"[Vision]\n{desc}")
+        vision_text = await transcribe_image_text(path, get_settings())
+        if vision_text and len(vision_text) > len(ocr_text):
+            parts.append(f"[Vision]\n{vision_text}")
 
     if parts:
         return "\n\n".join(parts)

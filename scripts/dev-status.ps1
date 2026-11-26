@@ -19,12 +19,13 @@ Write-Host ("ffprobe:          {0}" -f ($(if (Test-Cmd ffprobe) { "ok" } else { 
 Write-Host ("tesseract:        {0}" -f ($(if (Test-Cmd tesseract) { "ok" } else { "missing (optional OCR)" })))
 Write-Host ("pdftoppm:         {0}" -f ($(if (Test-Cmd pdftoppm) { "ok" } else { "missing (optional PDF OCR / Poppler)" })))
 
-$api = "http://127.0.0.1:8000/health"
+$port = if ($env:CHRONICUM_API_PORT) { $env:CHRONICUM_API_PORT } else { "8010" }
+$api = "http://127.0.0.1:$port/health"
 try {
     $h = Invoke-RestMethod -Uri $api -TimeoutSec 3
-    Write-Host ("API :8000:        ok mode={0} ai_ready={1}" -f $h.mode, $h.ai_ready)
+    Write-Host ("API :{0}:        ok mode={1} ai_ready={2}" -f $port, $h.mode, $h.ai_ready)
 } catch {
-    Write-Host "API :8000:        DOWN"
+    Write-Host ("API :{0}:        DOWN" -f $port)
 }
 
 try {
@@ -37,6 +38,6 @@ try {
 Write-Host ""
 Write-Host "Start (Cursor terminals):"
 Write-Host "  . .\scripts\load-env.ps1"
-Write-Host "  cd backend; ..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
-Write-Host "  cd web; npm run dev -- -H 127.0.0.1 -p 3000"
+Write-Host ("  cd backend; ..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port {0}" -f $port)
+Write-Host "  . .\scripts\load-env.ps1; cd web; npm run dev -- -H 127.0.0.1 -p 3000"
 Write-Host "  cd backend; ..\.venv\Scripts\python.exe -m app.bot.main"

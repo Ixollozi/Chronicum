@@ -84,3 +84,58 @@ def test_parse_instagram_html_carousel_media():
         ("image", "https://ig/1.jpg"),
         ("video", "https://ig/2.mp4"),
     ]
+
+
+def test_ytdlp_cookie_lock_retries_without_browser_cookies(monkeypatch):
+    """Chrome cookie DB lock must degrade to a second attempt without cookiesfrombrowser."""
+    from app.pipelines import youtube as yt
+
+    calls: list[dict] = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=True):
+            calls.append(dict(self.opts))
+            if self.opts.get("cookiesfrombrowser"):
+                raise PermissionError("Could not copy Chrome cookie database: Permission denied")
+            return {"id": "ok", "ext": "mp4", "title": "ok"}
+
+        def prepare_filename(self, info):
+            return "/tmp/ok.mp4"
+
+    class FakeYtDlp:
+        YoutubeDL = FakeYDL
+
+    monkeypatch.setitem(__import__("sys").modules, "yt_dlp", FakeYtDlp)
+    monkeypatch.setattr(yt, "_ffmpeg_available", lambda: False)
+
+    path, info = yt._ytdlp_run(
+        "https://www.instagram.com/reel/x/",
+        {
+            "outtmpl": "/tmp/%(id)s.%(ext)s",
+            "format": "b",
+            "quiet": True,
+            "cookiesfrombrowser": ("chrome",),
+        },
+    )
+    assert path.endswith("ok.mp4")
+    assert info and info.get("id") == "ok"
+    assert len(calls) == 2
+    assert "cookiesfrombrowser" in calls[0]
+    assert "cookiesfrombrowser" not in calls[1]
+
+
+def test_cookie_lock_error_detection():
+    from app.pipelines.youtube import _cookie_lock_error
+
+    assert _cookie_lock_error("Could not copy Chrome cookie database: Permission denied")
+    assert _cookie_lock_error("database is locked")
+    assert not _cookie_lock_error("HTTP Error 404: Not Found")

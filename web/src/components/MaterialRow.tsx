@@ -170,7 +170,17 @@ export function MaterialRow({
           </span>
         </div>
         <p className="mt-1 line-clamp-1 text-[0.8rem] text-[var(--muted)]">
-          {item.summary || item.main_idea || "Обрабатывается…"}
+          {item.summary ||
+            item.main_idea ||
+            (item.processing_status === "queued"
+              ? "В очереди на обработку…"
+              : item.processing_status === "processing"
+                ? "Обрабатывается…"
+                : item.processing_status === "failed"
+                  ? "Ошибка обработки"
+                  : item.processing_status === "awaiting_full"
+                    ? "Предпросмотр готов"
+                    : "Без описания")}
         </p>
         <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 text-[0.68rem] text-[color-mix(in_srgb,var(--muted)_88%,transparent)]">
           <span

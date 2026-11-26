@@ -152,6 +152,11 @@ export default function HomePage() {
       if (res.intent === "search" || res.intent === "refuse") {
         return;
       }
+      if (res.intent === "batch" || (res.items && res.items.length > 1)) {
+        setText("");
+        router.push("/archive?status=queued");
+        return;
+      }
       if (res.material_id) {
         setText("");
         router.push(`/m/${res.material_id}`);
@@ -174,7 +179,12 @@ export default function HomePage() {
         : file.type.startsWith("video/")
           ? "video"
           : undefined;
-      const res = await client.upload(file, kind);
+      const maybeUrl = text.trim();
+      const sourceUrl =
+        /^https?:\/\//i.test(maybeUrl) || /instagram\.com|youtu\.be|youtube\.com|tiktok\.com/i.test(maybeUrl)
+          ? maybeUrl
+          : undefined;
+      const res = await client.upload(file, kind, sourceUrl);
       router.push(`/m/${res.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка загрузки");
@@ -227,6 +237,26 @@ export default function HomePage() {
             </button>
           </div>
           <div className="whitespace-pre-wrap leading-relaxed text-[var(--ink)]">{result.answer}</div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-full border border-[var(--line)] px-3 py-1.5 text-xs text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--ink)]"
+              onClick={() => {
+                void client.searchFeedback(text || result.answer?.slice(0, 200) || "query", true);
+              }}
+            >
+              Полезно
+            </button>
+            <button
+              type="button"
+              className="rounded-full border border-[var(--line)] px-3 py-1.5 text-xs text-[var(--muted)] hover:border-[var(--warn)] hover:text-[var(--ink)]"
+              onClick={() => {
+                void client.searchFeedback(text || result.answer?.slice(0, 200) || "query", false);
+              }}
+            >
+              Мимо
+            </button>
+          </div>
           {result.sources?.length > 0 && (
             <ul className="mt-8 space-y-1 border-t border-[var(--line)] pt-5">
               <li className="mb-2 text-xs uppercase tracking-[0.18em] text-[var(--muted)]">Источники</li>

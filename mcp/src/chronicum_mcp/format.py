@@ -18,6 +18,8 @@ SUMMARY_FIELDS = (
     "usefulness_score",
     "processing_status",
     "processing_stage",
+    "trust_level",
+    "analysis_confidence",
 )
 
 CARD_EXTRA_FIELDS = (
@@ -35,6 +37,23 @@ CARD_EXTRA_FIELDS = (
     "error_message",
     "duration_seconds",
     "has_audio",
+    "key_moments",
+)
+
+TEACH_FIELDS = (
+    "id",
+    "title",
+    "trust_level",
+    "analysis_confidence",
+    "summary",
+    "main_idea",
+    "digest",
+    "detailed_explanation",
+    "tools",
+    "links",
+    "key_moments",
+    "code_blocks",
+    "source_url",
 )
 
 FULL_DROP = ("usage_tokens_in", "usage_tokens_out", "usage_audio_seconds")
@@ -70,8 +89,14 @@ def search_payload(data: dict[str, Any]) -> dict[str, Any]:
 
 def project_material(detail: dict[str, Any], level: str) -> dict[str, Any]:
     level = (level or "card").lower().strip()
-    if level not in {"summary", "card", "full"}:
-        raise ValueError("level must be summary, card, or full")
+    if level not in {"summary", "card", "teach", "full"}:
+        raise ValueError("level must be summary, card, teach, or full")
+
+    if level == "teach":
+        out = {k: detail.get(k) for k in TEACH_FIELDS}
+        out["summary"] = clip(out.get("summary"), 600)
+        out["main_idea"] = clip(out.get("main_idea"), 600)
+        return out
 
     out: dict[str, Any] = {k: detail.get(k) for k in SUMMARY_FIELDS}
     out["summary"] = clip(out.get("summary"), 600 if level != "summary" else SUMMARY_MAX)

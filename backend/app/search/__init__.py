@@ -42,7 +42,14 @@ def _tokens(query: str) -> list[str]:
     return out[:12]
 
 
-async def _sqlite_search(session: AsyncSession, query: str, limit: int) -> list[SearchHit]:
+async def _sqlite_search(
+    session: AsyncSession,
+    query: str,
+    limit: int,
+    *,
+    user_id: str | None = None,
+    scope_user: bool = False,
+) -> list[SearchHit]:
     tokens = _tokens(query)
     # Always include full query as fallback token if short
     if not tokens:
@@ -82,16 +89,20 @@ async def _sqlite_search(session: AsyncSession, query: str, limit: int) -> list[
     if cat_ids:
         conds.append(Material.category_id.in_(list(cat_ids)))
 
+    where = [
+        Material.processing_status == ProcessingStatus.DONE.value,
+        or_(*conds),
+    ]
+    if scope_user:
+        where.append(Material.user_id == user_id if user_id else Material.user_id.is_(None))
+
     result = await session.execute(
         select(Material)
         .options(
             selectinload(Material.category),
             selectinload(Material.tags).selectinload(MaterialTag.tag),
         )
-        .where(
-            Material.processing_status == ProcessingStatus.DONE.value,
-            or_(*conds),
-        )
+        .where(*where)
         .limit(80)
     )
     materials = list(result.scalars().unique().all())
@@ -118,21 +129,38 @@ async def _sqlite_search(session: AsyncSession, query: str, limit: int) -> list[
     return scored[:limit]
 
 
-async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[SearchHit]:
+async def fts_search(
+    session: AsyncSession,
+    query: str,
+    limit: int = 8,
+    *,
+    user_id: str | None = None,
+    scope_user: bool = False,
+) -> list[SearchHit]:
     q = query.strip()
     if not q:
         return []
 
     if get_settings().is_sqlite:
-        return await _sqlite_search(session, q, limit)
+        return await _sqlite_search(session, q, limit, user_id=user_id, scope_user=scope_user)
+
+    owner_sql = ""
+    params: dict = {"q": q, "limit": limit}
+    if scope_user:
+        if user_id:
+            owner_sql = " AND user_id = :uid"
+            params["uid"] = user_id
+        else:
+            owner_sql = " AND user_id IS NULL"
 
     sql = text(
-        """
+        f"""
         SELECT id, ts_rank(search_vector::tsvector, plainto_tsquery('simple', :q)) AS rank
         FROM materials
         WHERE processing_status = 'done'
           AND search_vector IS NOT NULL
           AND search_vector::tsvector @@ plainto_tsquery('simple', :q)
+          {owner_sql}
         ORDER BY
           coalesce(usefulness_score, 0) DESC,
           rank DESC
@@ -140,7 +168,7 @@ async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[
         """
     )
     try:
-        rows = (await session.execute(sql, {"q": q, "limit": limit})).all()
+        rows = (await session.execute(sql, params)).all()
     except Exception:
         rows = []
     ids = [r[0] for r in rows]
@@ -154,11 +182,17 @@ async def fts_search(session: AsyncSession, query: str, limit: int = 8) -> list[
         materials = {m.id: m for m in result.scalars().all()}
         return [SearchHit(material=materials[i], rank=ranks[i]) for i in ids if i in materials]
 
-    return await _sqlite_search(session, q, limit)
+    return await _sqlite_search(session, q, limit, user_id=user_id, scope_user=scope_user)
 
 
-async def answer_question(session: AsyncSession, question: str) -> tuple[str, list[Material]]:
-    hits = await fts_search(session, question)
+async def answer_question(
+    session: AsyncSession,
+    question: str,
+    *,
+    user_id: str | None = None,
+    scope_user: bool = False,
+) -> tuple[str, list[Material]]:
+    hits = await fts_search(session, question, user_id=user_id, scope_user=scope_user)
     if not hits:
         return (
             "Не нашёл релевантных материалов в базе. Попробуй другие формулировки или добавь контент.",
@@ -169,7 +203,11 @@ async def answer_question(session: AsyncSession, question: str) -> tuple[str, li
     for i, hit in enumerate(hits, 1):
         m = hit.material
         sources_block.append(
-            f"[{i}] id={m.id}\ntitle={m.title}\nsummary={m.summary}\nmain_idea={m.main_idea}\n"
+            f"[{i}] id={m.id}\ntitle={m.title}\n"
+            f"trust={getattr(m, 'trust_level', None)} conf={getattr(m, 'analysis_confidence', None)}\n"
+            f"summary={m.summary}\nmain_idea={m.main_idea}\n"
+            f"digest={(getattr(m, 'digest', None) or '')[:500]}\n"
+            f"tools={m.tools or []}\n"
             f"source_url={m.source_url or ''}\n"
         )
 

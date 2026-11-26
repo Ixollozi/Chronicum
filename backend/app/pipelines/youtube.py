@@ -18,6 +18,38 @@ def _ffmpeg_available() -> bool:
     return bool(shutil.which("ffmpeg"))
 
 
+def _cookie_lock_error(msg: str) -> bool:
+    low = msg.lower()
+    return any(
+        token in low
+        for token in (
+            "permission denied",
+            "could not copy chrome cookie",
+            "failed to load cookies",
+            "cookieloaderror",
+            "database is locked",
+            "errno 13",
+        )
+    )
+
+
+class _YtDlpLogger:
+    """Capture yt-dlp messages via structlog instead of writing to raw stdout/stderr.
+
+    Detached Windows processes can have invalid/closed console handles, where
+    yt-dlp printing warnings or progress triggers OSError [Errno 22] Invalid argument.
+    """
+
+    def debug(self, msg: str) -> None:
+        pass
+
+    def warning(self, msg: str) -> None:
+        log.debug("ytdlp_warn", msg=str(msg)[:300])
+
+    def error(self, msg: str) -> None:
+        log.debug("ytdlp_err", msg=str(msg)[:300])
+
+
 def _ytdlp_opts(
     out_dir: Path,
     *,
@@ -32,6 +64,8 @@ def _ytdlp_opts(
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
+        "logger": _YtDlpLogger(),
         "retries": 3,
         "fragment_retries": 3,
         "socket_timeout": 30,
@@ -69,9 +103,19 @@ def _ytdlp_run(url: str, opts: dict, *, download: bool = True):
         return run(opts)
     except Exception as exc:
         msg = str(exc)
+        # Chrome profile locked / cookie DB unreadable → drop browser cookies and retry
+        if opts.get("cookiesfrombrowser") and _cookie_lock_error(msg):
+            log.warning("ytdlp_cookie_lock_retry_without_browser", error=msg[:200])
+            fallback = dict(opts)
+            fallback.pop("cookiesfrombrowser", None)
+            try:
+                return run(fallback)
+            except Exception as exc2:
+                msg = str(exc2)
+                exc = exc2
         tls_fail = any(token in msg for token in ("curl: (35)", "SSLError", "OPENSSL_internal", "TLS connect"))
         if not (opts.get("impersonate") and tls_fail):
-            raise
+            raise exc
         log.warning("ytdlp_impersonate_tls_failed", error=msg[:200])
         fallback = dict(opts)
         fallback.pop("impersonate", None)
@@ -110,13 +154,26 @@ def _ytdlp_bundle(
     cookies: str = "",
     cookies_from_browser: str = "",
 ) -> MediaBundle:
-    opts = _ytdlp_opts(
-        out_dir,
-        cookies=cookies,
-        cookies_from_browser=cookies_from_browser,
-        ignoreerrors=True,
-    )
-    path, info = _ytdlp_run(url, opts)
+    try:
+        opts = _ytdlp_opts(
+            out_dir,
+            cookies=cookies,
+            cookies_from_browser=cookies_from_browser,
+            ignoreerrors=True,
+        )
+        path, info = _ytdlp_run(url, opts)
+    except Exception as exc:
+        if cookies_from_browser and _cookie_lock_error(str(exc)):
+            log.warning("ytdlp_bundle_cookie_lock_degrade", error=str(exc)[:200])
+            opts = _ytdlp_opts(
+                out_dir,
+                cookies=cookies,
+                cookies_from_browser="",
+                ignoreerrors=True,
+            )
+            path, info = _ytdlp_run(url, opts)
+        else:
+            raise
     if not info:
         raise RuntimeError("yt-dlp не вернул метаданные")
     title = info.get("title") or info.get("fulltitle") or "media"
@@ -280,10 +337,17 @@ async def download_media_bundle(url: str, *, label: str = "media") -> MediaBundl
                     return download_instagram_public(url, out_dir, cookies_file=cookies)
                 except Exception as e2:
                     log.exception("instagram_fallback_failed", error=str(e2)[:300])
+                    hint = (
+                        "Закрой Chrome и укажи MEDIA_COOKIES_FILE (Netscape cookies.txt), "
+                        "или загрузи ролик файлом на /add (можно с source_url)."
+                    )
+                    if _cookie_lock_error(msg) or _cookie_lock_error(str(e2)):
+                        hint = (
+                            "Chrome cookies недоступны (профиль открыт / Permission denied). "
+                            + hint
+                        )
                     raise RuntimeError(
-                        "Не удалось скачать Instagram (видео или карусель). "
-                        "Варианты: MEDIA_COOKIES_FILE / MEDIA_COOKIES_FROM_BROWSER=chrome "
-                        "или загрузи файлом."
+                        "Не удалось скачать Instagram (видео или карусель). " + hint
                     ) from e2
             if is_tt:
                 try:

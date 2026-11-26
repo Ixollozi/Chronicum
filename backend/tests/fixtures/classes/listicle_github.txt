@@ -1,0 +1,7 @@
+[0:00] Сегодня три open source проекта с GitHub. Первый Rybbit аналитика, второй BoardUI компоненты, третий witr утилита.
+[0:20] Ставь звёзды, ссылки в описании. Пиши в Telegram за подборкой.
+
+[On-screen OCR timed]
+[OCR 0:05] rybbit-io/rybbit
+[OCR 0:12] BoardUI/boardui
+[OCR 0:18] pranshuparmar/witr

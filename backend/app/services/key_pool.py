@@ -20,7 +20,7 @@ log = get_logger(__name__)
 PROVIDERS = ("groq", "google")
 SETTINGS_DEFAULTS = {
     "default_depth": "standard",
-    "auto_moments": "true",
+    "auto_moments": "false",
     "moments_vision_gate": "false",
     "video_full": "true",
 }
@@ -313,6 +313,8 @@ async def _set_rr_index(session: AsyncSession, provider: str, idx: int) -> None:
 
 async def acquire_keys(session: AsyncSession, provider: str) -> list[PooledKey]:
     """Ordered list of usable keys for provider (CRM enabled + env)."""
+    from app.services.ai_limits import key_in_cooldown
+
     rows = (
         await session.execute(
             select(ApiKey).where(ApiKey.provider == provider, ApiKey.enabled.is_(True)).order_by(ApiKey.id.asc())
@@ -335,14 +337,27 @@ async def acquire_keys(session: AsyncSession, provider: str) -> list[PooledKey]:
     if not pooled:
         return []
 
+    usable = [pk for pk in pooled if not key_in_cooldown(pk.id)]
+    if not usable:
+        # All cooling down — still return RR order so callers can wait/fail explicitly
+        usable = pooled
+        log.warning("all_keys_in_cooldown", provider=provider, count=len(pooled))
+
     start = await _rr_index(session, provider)
-    start = start % len(pooled)
-    ordered = pooled[start:] + pooled[:start]
-    await _set_rr_index(session, provider, (start + 1) % len(pooled))
+    start = start % len(usable)
+    ordered = usable[start:] + usable[:start]
+    await _set_rr_index(session, provider, (start + 1) % len(usable))
     return ordered
 
 
 async def mark_key_result(session: AsyncSession, key_id: int | str, *, ok: bool, error: str | None = None) -> None:
+    from app.services.ai_limits import clear_key_cooldown, is_rate_limit_error, set_key_cooldown
+
+    if ok:
+        clear_key_cooldown(key_id)
+    elif is_rate_limit_error(error):
+        set_key_cooldown(key_id)
+
     if isinstance(key_id, str):
         return
     row = await session.get(ApiKey, key_id)

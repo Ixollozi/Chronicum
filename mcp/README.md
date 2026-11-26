@@ -11,7 +11,14 @@ cd D:\Cursor\Chronicum
 .\.venv\Scripts\pip.exe install -e mcp
 ```
 
-Токен тот же, что у веба: `CHRONICUM_TOKEN` или `WEB_API_TOKEN` (по умолчанию `chronicum-dev-token`).
+**Google OAuth в MCP не поддерживается** (Cursor/Claude подставляют только статичный Bearer).
+
+Рабочий путь:
+1. Войди в Chronicum web через **Continue with Google**
+2. Настройки → Аккаунт → создай **Personal API Token**
+3. Вставь его в MCP как `CHRONICUM_TOKEN` или `Authorization: Bearer …`
+
+Для локального bootstrap по-прежнему можно `WEB_API_TOKEN` / `chronicum-dev-token` (admin, видит все данные включая orphan).
 
 ## Tools
 
@@ -72,8 +79,8 @@ Endpoint: `http://127.0.0.1:8001/mcp`
 | Env | Смысл |
 |---|---|
 | `CHRONICUM_API_URL` | база API, default `http://127.0.0.1:8000` |
-| `CHRONICUM_TOKEN` | Bearer к API (и к HTTP MCP) |
-| `WEB_API_TOKEN` | запасной, если `CHRONICUM_TOKEN` не задан |
+| `CHRONICUM_TOKEN` | Bearer к API: Personal API Token (после Google) или admin `WEB_API_TOKEN` |
+| `WEB_API_TOKEN` | запасной admin/bootstrap, если `CHRONICUM_TOKEN` не задан |
 
 ## Тесты
 

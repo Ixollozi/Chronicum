@@ -51,6 +51,10 @@ _YOUTUBE_ID = re.compile(
     re.I,
 )
 _TIKTOK_POST = re.compile(r"tiktok\.com/@[^/]+/(?:video|photo)/(\d+)", re.I)
+_IG_SHORTCODE = re.compile(
+    r"(?:instagram\.com|instagr\.am)/(?:reel|p|tv)/([A-Za-z0-9_-]+)",
+    re.I,
+)
 
 
 def _canonical_url(url: str) -> str:
@@ -61,4 +65,15 @@ def _canonical_url(url: str) -> str:
     match = _TIKTOK_POST.search(raw)
     if match:
         return f"tiktok:{match.group(1)}"
-    return raw.rstrip("/")
+    match = _IG_SHORTCODE.search(raw)
+    if match:
+        return f"instagram:{match.group(1)}"
+    # Drop tracking query/fragment so near-identical pastes collide
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(raw)
+        path = (parts.path or "/").rstrip("/") or "/"
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, "", ""))
+    except Exception:
+        return raw.rstrip("/")

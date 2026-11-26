@@ -2,7 +2,18 @@ import pytest
 
 from chronicum_mcp.tools import create_mcp
 
-EXPECTED = {"health", "search", "list_materials", "get_material", "list_taxonomy", "add_note", "add_url"}
+EXPECTED = {
+    "health",
+    "search",
+    "list_materials",
+    "get_material",
+    "list_taxonomy",
+    "add_note",
+    "add_url",
+    "list_clients",
+    "append_client_message",
+    "get_client_context",
+}
 
 
 @pytest.mark.asyncio
