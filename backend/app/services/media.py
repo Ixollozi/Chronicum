@@ -69,6 +69,14 @@ async def probe_duration_seconds(path: str) -> float:
             return float(result.stdout.strip())
         except ValueError:
             pass
+    # ffmpeg -i fallback (handles audio-only files when ffprobe is unavailable)
+    ff_res = await run_cmd([ffmpeg_exe(), "-i", path], timeout=60)
+    m = re.search(r"Duration:\s*(\d{2,}):(\d{2}):(\d{2}(?:\.\d+)?)", ff_res.stderr or "")
+    if m:
+        try:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        except ValueError:
+            pass
     # OpenCV fallback
     try:
 
@@ -127,6 +135,57 @@ async def extract_audio_segment(video_path: str, start: float, duration: float, 
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg segment failed: {(result.stderr or '')[:800]}")
     return out_path
+
+
+async def split_audio_chunks(
+    audio_path: str,
+    out_dir: str,
+    *,
+    chunk_seconds: int = 600,
+    bitrate: str = "64k",
+) -> list[str]:
+    """Split/transcode audio into 16kHz mono MP3 chunks sized for Whisper API limits."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    seg_time = max(5, int(chunk_seconds))
+    pattern = str(Path(out_dir) / "chunk_%04d.mp3")
+    ff = ffmpeg_exe()
+    result = await run_cmd(
+        [
+            ff,
+            "-y",
+            "-i",
+            audio_path,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-acodec",
+            "libmp3lame",
+            "-b:a",
+            bitrate,
+            "-f",
+            "segment",
+            "-segment_time",
+            str(seg_time),
+            "-reset_timestamps",
+            "1",
+            pattern,
+        ],
+        timeout=900,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or "")[:800]
+        if "not found" in err.lower() or result.returncode == 127:
+            raise RuntimeError(
+                "ffmpeg не найден — невозможно нарезать длинное аудио для Whisper. "
+                "Установи: winget install Gyan.FFmpeg или pip install imageio-ffmpeg."
+            )
+        raise RuntimeError(f"ffmpeg audio chunk split failed: {err}")
+    chunks = sorted(str(p) for p in Path(out_dir).glob("chunk_*.mp3") if p.stat().st_size > 0)
+    if not chunks:
+        raise RuntimeError("ffmpeg не создал ни одного аудио-чанка")
+    return chunks
 
 
 async def extract_frame_at(video_path: str, t_sec: float, out_path: str) -> bool:
@@ -312,14 +371,21 @@ async def extract_best_frame_near(
     return Path(out_path).exists() and Path(out_path).stat().st_size > 0, best_t
 
 
-async def extract_keyframes(video_path: str, out_dir: str, every_seconds: int = 15, max_frames: int = 40) -> list[str]:
+async def extract_keyframes(
+    video_path: str,
+    out_dir: str,
+    every_seconds: int = 15,
+    max_frames: int = 40,
+    duration_limit: float | None = None,
+) -> list[str]:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     pattern = str(Path(out_dir) / "frame_%04d.jpg")
     ff = ffmpeg_exe()
-    result = await run_cmd(
+    cmd = [ff, "-y"]
+    if duration_limit and duration_limit > 0:
+        cmd.extend(["-t", str(duration_limit)])
+    cmd.extend(
         [
-            ff,
-            "-y",
             "-i",
             video_path,
             "-vf",
@@ -329,6 +395,7 @@ async def extract_keyframes(video_path: str, out_dir: str, every_seconds: int = 
             pattern,
         ]
     )
+    result = await run_cmd(cmd)
     paths = sorted(str(p) for p in Path(out_dir).glob("frame_*.jpg"))
     if paths:
         return paths
@@ -343,6 +410,8 @@ async def extract_keyframes(video_path: str, out_dir: str, every_seconds: int = 
             return []
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 25)
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if duration_limit and duration_limit > 0 and fps > 0:
+            total = min(total, int(fps * duration_limit)) if total > 0 else int(fps * duration_limit)
         step = max(1, int(fps * every_seconds))
         out: list[str] = []
         i = 0

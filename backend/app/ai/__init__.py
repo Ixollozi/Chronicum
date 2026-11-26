@@ -323,60 +323,93 @@ class GroqTranscribeClient(TranscribeClient):
         self.client = AsyncGroq(api_key=api_key)
         self.model = settings.groq_whisper_model
 
-    async def transcribe(self, path: str, language: str | None = None) -> TranscribeResult:
-        from pathlib import Path
+    @staticmethod
+    def _build_prompt(lang: str) -> str:
+        if lang == "ru":
+            return (
+                "Транскрипция разговорной русской речи. "
+                "Пиши дословно, сохраняй мат, сленг и междометия. "
+                "Не цензурируй и не заменяй слова звёздочками или эвфемизмами. "
+                "Названия продуктов оставляй как есть: CapCut, overlay, keyframe, opacity."
+            )
+        if lang == "en":
+            return (
+                "Transcribe spoken English faithfully. Keep UI/product terms as CapCut, "
+                "overlay, keyframe, opacity, layer, timeline, blend."
+            )
+        return (
+            "Transcribe faithfully in the spoken language. Keep product/UI names: "
+            "CapCut, overlay, keyframe, opacity, layer, timeline. "
+            "Do not translate technical UI terms into unrelated words."
+        )
 
-        try:
-            p = Path(path)
-            data = p.read_bytes()
-            # None → settings.whisper_language; "auto" → let Whisper detect (fixes EN tutorials forced to RU)
-            cfg_lang = (getattr(self.settings, "whisper_language", None) or "auto").strip().lower()
-            lang = (language if language is not None else cfg_lang).strip().lower() or "auto"
-            kwargs: dict[str, Any] = {
-                "file": (p.name, data),
-                "model": self.model,
-                "response_format": "verbose_json",
-                "timestamp_granularities": ["segment"],
-                "temperature": 0,
-            }
-            if lang != "auto":
-                kwargs["language"] = lang
-            if lang == "ru":
-                kwargs["prompt"] = (
-                    "Транскрипция разговорной русской речи. "
-                    "Пиши дословно, сохраняй мат, сленг и междометия. "
-                    "Не цензурируй и не заменяй слова звёздочками или эвфемизмами. "
-                    "Названия продуктов оставляй как есть: CapCut, overlay, keyframe, opacity."
-                )
-            elif lang == "en":
-                kwargs["prompt"] = (
-                    "Transcribe spoken English faithfully. Keep UI/product terms as CapCut, "
-                    "overlay, keyframe, opacity, layer, timeline, blend."
-                )
-            else:
-                kwargs["prompt"] = (
-                    "Transcribe faithfully in the spoken language. Keep product/UI names: "
-                    "CapCut, overlay, keyframe, opacity, layer, timeline. "
-                    "Do not translate technical UI terms into unrelated words."
-                )
+    @staticmethod
+    def _classify_api_error(exc: Exception) -> str:
+        """Classify transcription API errors to avoid spurious retries or silent 413 failures."""
+        status = getattr(exc, "status_code", None)
+        msg = str(exc).lower()
+        if (
+            status in (401, 429)
+            or "401" in msg
+            or "invalid api key" in msg
+            or "429" in msg
+            or "rate limit" in msg
+        ):
+            return "rate_limit"
+        if (
+            status == 413
+            or "413" in msg
+            or "too large" in msg
+            or "entity too large" in msg
+            or "maximum content size" in msg
+        ):
+            return "payload_too_large"
+        if status in (500, 502, 503, 504) or any(
+            tok in msg
+            for tok in ("timeout", "timed out", "connection", "502", "503", "504", "500")
+        ):
+            return "transient"
+        return "param"
+
+    @staticmethod
+    def _format_timed_segments(segments: list[TranscriptSegment]) -> str:
+        timed_lines = []
+        for seg in segments:
+            m, sec = divmod(int(max(0.0, seg.start)), 60)
+            timed_lines.append(f"[{m}:{sec:02d}] {seg.text}")
+        return "\n".join(timed_lines)
+
+    async def _call_transcriptions_api(self, kwargs: dict[str, Any]):
+        import asyncio
+
+        current = dict(kwargs)
+        transient_attempts = 0
+        max_transient = max(1, int(getattr(self.settings, "max_api_retries", 3) or 3))
+        while True:
             try:
-                resp = await self.client.audio.transcriptions.create(**kwargs)
-            except Exception:
+                return await self.client.audio.transcriptions.create(**current)
+            except Exception as e:
+                kind = self._classify_api_error(e)
+                if kind == "rate_limit":
+                    raise RateLimitError(str(e)) from e
+                if kind == "payload_too_large":
+                    raise
+                if kind == "transient":
+                    transient_attempts += 1
+                    if transient_attempts < max_transient:
+                        await asyncio.sleep(min(2.0 * transient_attempts, 5.0))
+                        continue
+                    raise
                 # Older API / models may reject timestamp_granularities or prompt
-                kwargs.pop("timestamp_granularities", None)
-                try:
-                    resp = await self.client.audio.transcriptions.create(**kwargs)
-                except Exception:
-                    kwargs.pop("prompt", None)
-                    resp = await self.client.audio.transcriptions.create(**kwargs)
-        except Exception as e:
-            msg = str(e).lower()
-            if "401" in msg or "invalid api key" in msg:
-                raise RateLimitError(str(e)) from e
-            if "429" in msg or "rate limit" in msg:
-                raise RateLimitError(str(e)) from e
-            raise
+                if "timestamp_granularities" in current:
+                    current.pop("timestamp_granularities", None)
+                    continue
+                if "prompt" in current:
+                    current.pop("prompt", None)
+                    continue
+                raise
 
+    def _parse_response(self, resp: Any) -> TranscribeResult:
         text = getattr(resp, "text", "") or ""
         duration = float(getattr(resp, "duration", 0) or 0)
         segments: list[TranscriptSegment] = []
@@ -394,11 +427,7 @@ class GroqTranscribeClient(TranscribeClient):
                 segments.append(TranscriptSegment(start=start, end=end, text=seg_text))
 
         if segments:
-            timed_lines = []
-            for seg in segments:
-                m, sec = divmod(int(seg.start), 60)
-                timed_lines.append(f"[{m}:{sec:02d}] {seg.text}")
-            text = "\n".join(timed_lines)
+            text = self._format_timed_segments(segments)
 
         detected = getattr(resp, "language", None)
         if detected is not None:
@@ -411,6 +440,173 @@ class GroqTranscribeClient(TranscribeClient):
             model=self.model,
             language=detected,
             segments=segments,
+        )
+
+    async def _transcribe_single(
+        self,
+        path: str,
+        *,
+        lang: str,
+        prompt: str,
+    ) -> TranscribeResult:
+        import asyncio
+        from pathlib import Path
+
+        p = Path(path)
+        data = await asyncio.to_thread(p.read_bytes)
+        kwargs: dict[str, Any] = {
+            "file": (p.name, data),
+            "model": self.model,
+            "response_format": "verbose_json",
+            "timestamp_granularities": ["segment"],
+            "temperature": 0,
+            "prompt": prompt,
+        }
+        if lang != "auto":
+            kwargs["language"] = lang
+
+        resp = await self._call_transcriptions_api(kwargs)
+        return self._parse_response(resp)
+
+    async def _transcribe_chunked(
+        self,
+        path: str,
+        *,
+        lang: str,
+        prompt: str,
+        max_bytes: int,
+        chunk_seconds: int,
+    ) -> TranscribeResult:
+        import tempfile
+        from pathlib import Path
+
+        from app.services.media import probe_duration_seconds, split_audio_chunks
+
+        # 64 kbps mono ≈ 8000 bytes/s; leave 20% headroom below max_bytes
+        max_sec_for_bytes = max(5, int((max_bytes * 0.8) / 8000))
+        effective_chunk_seconds = min(chunk_seconds, max_sec_for_bytes)
+
+        log.info(
+            "whisper_chunked_start",
+            path=path,
+            chunk_seconds=effective_chunk_seconds,
+            max_bytes=max_bytes,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="chronicum_asr_") as tmp_dir:
+            chunks = await split_audio_chunks(
+                path,
+                tmp_dir,
+                chunk_seconds=effective_chunk_seconds,
+            )
+            all_segments: list[TranscriptSegment] = []
+            plain_parts: list[str] = []
+            total_audio_seconds = 0.0
+            detected_language: str | None = None
+            has_text_language = False
+            offset = 0.0
+
+            for idx, chunk_path in enumerate(chunks):
+                chunk_size = Path(chunk_path).stat().st_size
+                if chunk_size > max_bytes:
+                    raise RuntimeError(
+                        f"Audio chunk {idx + 1}/{len(chunks)} is {chunk_size} bytes "
+                        f"(exceeds limit {max_bytes} bytes)"
+                    )
+                probed_dur = await probe_duration_seconds(chunk_path)
+                res = await self._transcribe_single(chunk_path, lang=lang, prompt=prompt)
+
+                chunk_dur = probed_dur or res.audio_seconds or (
+                    float(effective_chunk_seconds) if idx < len(chunks) - 1 else 0.0
+                )
+                total_audio_seconds += res.audio_seconds or probed_dur
+
+                if res.language and (
+                    not detected_language or (not has_text_language and res.text.strip())
+                ):
+                    detected_language = res.language
+                    if res.text.strip():
+                        has_text_language = True
+
+                if res.segments:
+                    for seg in res.segments:
+                        all_segments.append(
+                            TranscriptSegment(
+                                start=round(seg.start + offset, 3),
+                                end=round(seg.end + offset, 3),
+                                text=seg.text,
+                            )
+                        )
+                elif res.text.strip():
+                    plain_parts.append(res.text.strip())
+                    all_segments.append(
+                        TranscriptSegment(
+                            start=round(offset, 3),
+                            end=round(offset + chunk_dur, 3),
+                            text=res.text.strip(),
+                        )
+                    )
+
+                offset += chunk_dur
+
+            text = self._format_timed_segments(all_segments) if all_segments else "\n".join(plain_parts)
+
+            log.info(
+                "whisper_chunked_done",
+                path=path,
+                chunks=len(chunks),
+                audio_seconds=round(total_audio_seconds, 2),
+                segments=len(all_segments),
+            )
+            return TranscribeResult(
+                text=text,
+                audio_seconds=total_audio_seconds,
+                provider="groq",
+                model=self.model,
+                language=detected_language,
+                segments=all_segments,
+            )
+
+    async def transcribe(self, path: str, language: str | None = None) -> TranscribeResult:
+        from pathlib import Path
+
+        from app.services.media import probe_duration_seconds
+
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(f"Audio file not found: {path}")
+
+        # None → settings.whisper_language; "auto" → let Whisper detect (fixes EN tutorials forced to RU)
+        cfg_lang = (getattr(self.settings, "whisper_language", None) or "auto").strip().lower()
+        lang = (language if language is not None else cfg_lang).strip().lower() or "auto"
+        prompt = self._build_prompt(lang)
+
+        max_mb = float(getattr(self.settings, "whisper_max_file_mb", 20.0) or 20.0)
+        max_bytes = max(1024, int(max_mb * 1024 * 1024))
+        chunk_seconds = max(5, int(getattr(self.settings, "whisper_chunk_seconds", 600) or 600))
+
+        file_size = p.stat().st_size
+        duration = 0.0 if file_size > max_bytes else await probe_duration_seconds(str(p))
+        needs_chunking = file_size > max_bytes or (duration > 0 and duration > chunk_seconds)
+
+        if not needs_chunking:
+            try:
+                return await self._transcribe_single(str(p), lang=lang, prompt=prompt)
+            except Exception as e:
+                if self._classify_api_error(e) != "payload_too_large":
+                    raise
+                log.warning(
+                    "whisper_413_fallback_to_chunks",
+                    path=str(p),
+                    size_bytes=file_size,
+                )
+
+        return await self._transcribe_chunked(
+            str(p),
+            lang=lang,
+            prompt=prompt,
+            max_bytes=max_bytes,
+            chunk_seconds=chunk_seconds,
         )
 
 

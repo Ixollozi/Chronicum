@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,6 +81,23 @@ _GOOD_SPEECH = re.compile(
     r")\b",
     re.I,
 )
+
+
+def _has_existing_moment_images(material: Material, out_dir: Path) -> bool:
+    for item in material.key_moments or []:
+        if not isinstance(item, dict):
+            continue
+        rel = item.get("image_relpath")
+        if not rel:
+            continue
+        fname = Path(str(rel)).name
+        candidate = out_dir / fname
+        try:
+            if fname and candidate.is_file() and candidate.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _moments_dir(material_id: str) -> Path:
@@ -660,6 +679,17 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
     if vpath and (not material.file_path or not Path(material.file_path).exists()):
         material.file_path = vpath
 
+    out_dir = _moments_dir(material.id)
+    has_existing_images = _has_existing_moment_images(material, out_dir)
+    if not vpath and has_existing_images:
+        log.warning(
+            "moments_no_video_preserving_existing",
+            material_id=material.id,
+            source=material.source_type,
+            existing_count=len(material.key_moments or []),
+        )
+        return material
+
     duration = float(material.duration_seconds or 0)
     if vpath:
         probed = await probe_duration_seconds(vpath)
@@ -793,12 +823,6 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
             ]
         picks = llm_picks
 
-    out_dir = _moments_dir(material.id)
-    for old in out_dir.glob("*.jpg"):
-        try:
-            old.unlink()
-        except Exception:
-            pass
     moments: list[dict] = []
 
     if not vpath:
@@ -830,116 +854,92 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
         used_ts.append(t)
         return t
 
-    async def _capture(i: int, pick: dict) -> dict | None:
-        quote = str(pick.get("quote") or "")
-        caption_hint = str(pick.get("caption") or "")
-        why = str(pick.get("why") or "")
-        when = str(pick.get("when_to_apply") or "")
-        ocr_text = str(pick.get("_ocr") or caption_hint)
-        atlas_src = pick.get("_atlas_path")
+    with tempfile.TemporaryDirectory(prefix="moments_staging_", dir=out_dir.parent) as staging_tmp:
+        staging_dir = Path(staging_tmp)
 
-        try:
-            t_hint = float(pick.get("t_sec") or 0)
-        except (TypeError, ValueError):
-            t_hint = 0.0
+        async def _capture(i: int, pick: dict) -> dict | None:
+            quote = str(pick.get("quote") or "")
+            caption_hint = str(pick.get("caption") or "")
+            why = str(pick.get("why") or "")
+            when = str(pick.get("when_to_apply") or "")
+            ocr_text = str(pick.get("_ocr") or caption_hint)
+            atlas_src = pick.get("_atlas_path")
 
-        # Prefer exact atlas timestamp (no roaming offsets that land on neighbor slides)
-        if atlas_src and Path(str(atlas_src)).exists():
-            t = _accept_t(t_hint)
-            if t is None:
-                return None
-            fname = f"moment_{i:02d}_{int(t)}.jpg"
-            fpath = str(out_dir / fname)
             try:
-                shutil.copyfile(str(atlas_src), fpath)
-            except Exception:
-                ok = await extract_frame_at(vpath, t, fpath)
+                t_hint = float(pick.get("t_sec") or 0)
+            except (TypeError, ValueError):
+                t_hint = 0.0
+
+            # Prefer exact atlas timestamp (no roaming offsets that land on neighbor slides)
+            if atlas_src and Path(str(atlas_src)).exists():
+                t = _accept_t(t_hint)
+                if t is None:
+                    return None
+                fname = f"moment_{i:02d}_{int(t)}.jpg"
+                fpath = str(staging_dir / fname)
+                try:
+                    shutil.copyfile(str(atlas_src), fpath)
+                except Exception:
+                    ok = await extract_frame_at(vpath, t, fpath)
+                    if not ok:
+                        if used_ts and abs(used_ts[-1] - t) < 0.05:
+                            used_ts.pop()
+                        return None
+                chosen_t = t
+            else:
+                snapped = resolve_timestamp(
+                    t_sec=t_hint,
+                    quote=quote,
+                    caption=caption_hint,
+                    segments=segments,
+                    duration=duration,
+                )
+                t = _accept_t(snapped)
+                if t is None:
+                    for bump in (min_gap, min_gap * 1.5, min_gap * 2.2):
+                        t = _accept_t(snapped + bump)
+                        if t is not None:
+                            break
+                if t is None:
+                    return None
+                fname = f"moment_{i:02d}_{int(t)}.jpg"
+                fpath = str(staging_dir / fname)
+                # Tight offsets only — avoid jumping onto next title card
+                ok, chosen_t = await extract_best_frame_near(
+                    vpath, t, fpath, duration=duration, offsets=[0.0, 0.15, -0.15, 0.35]
+                )
                 if not ok:
                     if used_ts and abs(used_ts[-1] - t) < 0.05:
                         used_ts.pop()
                     return None
-            chosen_t = t
-        else:
-            snapped = resolve_timestamp(
-                t_sec=t_hint,
-                quote=quote,
-                caption=caption_hint,
-                segments=segments,
-                duration=duration,
-            )
-            t = _accept_t(snapped)
-            if t is None:
-                for bump in (min_gap, min_gap * 1.5, min_gap * 2.2):
-                    t = _accept_t(snapped + bump)
-                    if t is not None:
-                        break
-            if t is None:
-                return None
-            fname = f"moment_{i:02d}_{int(t)}.jpg"
-            fpath = str(out_dir / fname)
-            # Tight offsets only — avoid jumping onto next title card
-            ok, chosen_t = await extract_best_frame_near(
-                vpath, t, fpath, duration=duration, offsets=[0.0, 0.15, -0.15, 0.35]
-            )
-            if not ok:
                 if used_ts and abs(used_ts[-1] - t) < 0.05:
-                    used_ts.pop()
-                return None
-            if used_ts and abs(used_ts[-1] - t) < 0.05:
-                used_ts[-1] = chosen_t
-            t = chosen_t
+                    used_ts[-1] = chosen_t
+                t = chosen_t
 
-        # Refresh OCR from the actual frame file
-        try:
-            from app.services.screen_atlas import _ocr_image
-            import asyncio
-
-            fresh = await asyncio.to_thread(_ocr_image, fpath)
-            if fresh:
-                ocr_text = fresh
-        except Exception:
-            pass
-
-        # Prefer usable OCR; otherwise keep speech caption (do not drop good frames)
-        from app.services.local_ocr import ocr_sanitize
-
-        usable_ocr = ocr_sanitize(ocr_text or "")
-        from app.services.local_ocr import ocr_caption_weak
-
-        caption = usable_ocr
-        if not caption or ocr_caption_weak(caption):
-            caption = _caption_from_speech(quote, why) or _caption_from_ocr(caption_hint)
-        if not caption or ocr_caption_weak(caption):
-            caption = _caption_from_speech(context_around(segments, t), why)
-
-        if not caption:
+            # Refresh OCR from the actual frame file
             try:
-                Path(fpath).unlink(missing_ok=True)
+                from app.services.screen_atlas import _ocr_image
+                import asyncio
+
+                fresh = await asyncio.to_thread(_ocr_image, fpath)
+                if fresh:
+                    ocr_text = fresh
             except Exception:
                 pass
-            if used_ts and abs(used_ts[-1] - t) < 0.05:
-                used_ts.pop()
-            return None
 
-        moment = {
-            "t_sec": round(t, 2),
-            "caption": caption[:400],
-            "why": why,
-            "when_to_apply": when,
-            "quote": quote,
-            "visible_text": (usable_ocr or "")[:500],
-            "image_relpath": f"materials/{material.id}/moments/{fname}",
-        }
+            # Prefer usable OCR; otherwise keep speech caption (do not drop good frames)
+            from app.services.local_ocr import ocr_sanitize
 
-        # Optional paid vision gate (off by default)
-        if vision_gate and not (ocr_text and len(ocr_text) >= 8):
-            ctx = context_around(segments, t)
-            try:
-                analyzed = await analyze_moment_frame(fpath, t_sec=t, spoken_context=ctx or quote)
-            except Exception as e:
-                log.warning("moment_vision_failed", error=str(e)[:200])
-                analyzed = {}
-            if analyzed.get("junk") and int(analyzed.get("quality") or 0) <= 2:
+            usable_ocr = ocr_sanitize(ocr_text or "")
+            from app.services.local_ocr import ocr_caption_weak
+
+            caption = usable_ocr
+            if not caption or ocr_caption_weak(caption):
+                caption = _caption_from_speech(quote, why) or _caption_from_ocr(caption_hint)
+            if not caption or ocr_caption_weak(caption):
+                caption = _caption_from_speech(context_around(segments, t), why)
+
+            if not caption:
                 try:
                     Path(fpath).unlink(missing_ok=True)
                 except Exception:
@@ -947,48 +947,108 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
                 if used_ts and abs(used_ts[-1] - t) < 0.05:
                     used_ts.pop()
                 return None
-            if analyzed.get("caption") and not caption:
-                moment["caption"] = analyzed["caption"]
-            if analyzed.get("why"):
-                moment["why"] = analyzed["why"]
-            if analyzed.get("visible_text"):
-                moment["visible_text"] = analyzed["visible_text"]
 
-        return moment
+            moment = {
+                "t_sec": round(t, 2),
+                "caption": caption[:400],
+                "why": why,
+                "when_to_apply": when,
+                "quote": quote,
+                "visible_text": (usable_ocr or "")[:500],
+                "image_relpath": f"materials/{material.id}/moments/{fname}",
+            }
 
-    if picks:
-        for i, m in enumerate(picks[:7]):
-            captured = await _capture(i, m if isinstance(m, dict) else {})
-            if captured:
-                moments.append(captured)
-    else:
-        ratios = (0.18, 0.35, 0.52, 0.68, 0.84) if duration > 0 else ()
-        for i, ratio in enumerate(ratios):
-            captured = await _capture(i, {"t_sec": duration * ratio})
-            if captured:
-                moments.append(captured)
-        if not moments:
-            step = 20 if duration <= 0 else max(8, int(duration / 5))
-            frames = await extract_keyframes(vpath, str(out_dir), every_seconds=step, max_frames=5)
-            for i, fp in enumerate(frames):
-                fname = Path(fp).name
-                dest = out_dir / fname
-                if Path(fp).resolve() != dest.resolve():
+            # Optional paid vision gate (off by default)
+            if vision_gate and not (ocr_text and len(ocr_text) >= 8):
+                ctx = context_around(segments, t)
+                try:
+                    analyzed = await analyze_moment_frame(fpath, t_sec=t, spoken_context=ctx or quote)
+                except Exception as e:
+                    log.warning("moment_vision_failed", error=str(e)[:200])
+                    analyzed = {}
+                if analyzed.get("junk") and int(analyzed.get("quality") or 0) <= 2:
                     try:
-                        dest.write_bytes(Path(fp).read_bytes())
+                        Path(fpath).unlink(missing_ok=True)
                     except Exception:
                         pass
-                moments.append(
-                    {
-                        "t_sec": float(i * step),
-                        "caption": "",
-                        "why": "",
-                        "when_to_apply": "",
-                        "image_relpath": f"materials/{material.id}/moments/{fname}",
-                    }
-                )
+                    if used_ts and abs(used_ts[-1] - t) < 0.05:
+                        used_ts.pop()
+                    return None
+                if analyzed.get("caption") and not caption:
+                    moment["caption"] = analyzed["caption"]
+                if analyzed.get("why"):
+                    moment["why"] = analyzed["why"]
+                if analyzed.get("visible_text"):
+                    moment["visible_text"] = analyzed["visible_text"]
 
-    saved = sum(1 for m in moments if m.get("image_relpath"))
+            return moment
+
+        if picks:
+            for i, m in enumerate(picks[:7]):
+                captured = await _capture(i, m if isinstance(m, dict) else {})
+                if captured:
+                    moments.append(captured)
+        else:
+            ratios = (0.18, 0.35, 0.52, 0.68, 0.84) if duration > 0 else ()
+            for i, ratio in enumerate(ratios):
+                captured = await _capture(i, {"t_sec": duration * ratio})
+                if captured:
+                    moments.append(captured)
+            if not moments:
+                step = 20 if duration <= 0 else max(8, int(duration / 5))
+                frames = await extract_keyframes(vpath, str(staging_dir), every_seconds=step, max_frames=5)
+                for i, fp in enumerate(frames):
+                    fname = Path(fp).name
+                    dest = staging_dir / fname
+                    if Path(fp).resolve() != dest.resolve():
+                        try:
+                            dest.write_bytes(Path(fp).read_bytes())
+                        except Exception:
+                            pass
+                    moments.append(
+                        {
+                            "t_sec": float(i * step),
+                            "caption": "",
+                            "why": "",
+                            "when_to_apply": "",
+                            "image_relpath": f"materials/{material.id}/moments/{fname}",
+                        }
+                    )
+
+        staged_files: dict[str, Path] = {}
+        for m in moments:
+            rel = m.get("image_relpath")
+            if not rel:
+                continue
+            fname = Path(str(rel)).name
+            sf = staging_dir / fname
+            if fname and sf.is_file() and sf.stat().st_size > 0:
+                staged_files[fname] = sf
+        saved = len(staged_files)
+
+        if saved == 0:
+            log.warning(
+                "moments_capture_produced_no_images",
+                material_id=material.id,
+                total=len(moments),
+                preserved_existing=has_existing_images,
+                video=vpath,
+            )
+            raise RuntimeError(
+                "Моменты без картинок: не удалось вытащить кадры из видео. "
+                "Проверь ffmpeg (pip install imageio-ffmpeg / winget install Gyan.FFmpeg)."
+            )
+
+        # Swap staged frames into out_dir, then prune only obsolete files
+        for fname, src in staged_files.items():
+            os.replace(src, out_dir / fname)
+        for old in out_dir.glob("*.jpg"):
+            if old.name not in staged_files:
+                try:
+                    old.unlink()
+                except Exception:
+                    pass
+
     log.info(
         "moments_built",
         material_id=material.id,
@@ -1003,9 +1063,4 @@ async def build_key_moments(session: AsyncSession, material: Material, video_pat
     material.key_moments = moments
     await session.commit()
     await session.refresh(material)
-    if moments and saved == 0:
-        raise RuntimeError(
-            "Моменты без картинок: не удалось вытащить кадры из видео. "
-            "Проверь ffmpeg (pip install imageio-ffmpeg / winget install Gyan.FFmpeg)."
-        )
     return material
