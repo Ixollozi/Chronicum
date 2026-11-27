@@ -120,16 +120,73 @@ class ComposerResponse(BaseModel):
     items: list[ComposerBatchItem] = Field(default_factory=list)
 
 
+class GraphCluster(BaseModel):
+    id: str
+    label: str
+    category: str | None = None
+    color: str
+    color_slot: str
+    count: int
+    avg_score: float | None = None
+    x: float
+    y: float
+    radius: float
+    hull: list[list[float]] = Field(default_factory=list)
+    top_tags: list[str] = Field(default_factory=list)
+    top_tools: list[str] = Field(default_factory=list)
+
+
+class GraphClusterEdge(BaseModel):
+    source: str
+    target: str
+    weight: float
+    shared_edges: int
+    similarity: float | None = None
+    top_tools: list[str] = Field(default_factory=list)
+
+
+class GraphFacetItem(BaseModel):
+    key: str
+    label: str
+    count: int
+
+
+class GraphFacets(BaseModel):
+    categories: list[GraphFacetItem] = Field(default_factory=list)
+    tags: list[GraphFacetItem] = Field(default_factory=list)
+    tools: list[GraphFacetItem] = Field(default_factory=list)
+    source_types: list[GraphFacetItem] = Field(default_factory=list)
+
+
+class GraphMeta(BaseModel):
+    total_materials: int = 0
+    total_nodes: int = 0
+    total_edges: int = 0
+    total_clusters: int = 0
+    uncategorized_count: int = 0
+    untagged_count: int = 0
+    max_degree: int = 0
+    median_degree: float = 0.0
+    edge_counts: dict[str, int] = Field(default_factory=dict)
+    facets: GraphFacets = Field(default_factory=GraphFacets)
+
+
 class GraphNode(BaseModel):
     id: str
-    type: str = "material"  # material | tag | category
+    type: str = "material"  # material | client
     title: str
     category: str | None = None
+    cluster_id: str | None = None
     tags: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
     score: int | None = None
     status: str
     source_type: str
+    url: str | None = None
     summary: str | None = None
+    created_at: str | None = None
+    x: float = 0.0
+    y: float = 0.0
     degree: int = 0
 
 
@@ -143,8 +200,12 @@ class GraphLink(BaseModel):
 
 
 class GraphResponse(BaseModel):
+    clusters: list[GraphCluster] = Field(default_factory=list)
     nodes: list[GraphNode]
-    links: list[GraphLink]
+    edges: list[GraphLink] = Field(default_factory=list)
+    links: list[GraphLink] = Field(default_factory=list)
+    cluster_edges: list[GraphClusterEdge] = Field(default_factory=list)
+    meta: GraphMeta = Field(default_factory=GraphMeta)
 
 
 class SearchRequest(BaseModel):

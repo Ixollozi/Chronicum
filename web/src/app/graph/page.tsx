@@ -1,146 +1,118 @@
 "use client";
 
-import { forceCollide } from "d3-force";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ForceGraphCanvas from "@/components/ForceGraphCanvas";
 import { FancySelect } from "@/components/FancySelect";
-import { client, type GraphPayload } from "@/lib/api";
-import { nodeTypeLabel, searchGraphNodes } from "@/lib/graphSearch";
+import KnowledgeAtlasCanvas, {
+  EDGE_COLORS,
+  type AtlasLodLevel,
+  type AtlasViewMode,
+  type KnowledgeAtlasHandle,
+} from "@/components/KnowledgeAtlasCanvas";
+import {
+  client,
+  type GraphCluster,
+  type GraphEdge,
+  type GraphNode,
+  type GraphPayload,
+} from "@/lib/api";
+import {
+  nodeTypeLabel,
+  searchGraphClusters,
+  searchGraphNodes,
+} from "@/lib/graphSearch";
 
-type GNode = GraphPayload["nodes"][number] & {
-  x?: number;
-  y?: number;
-  vx?: number;
-  vy?: number;
-  fx?: number;
-  fy?: number;
-  val?: number;
-};
-type GLink = {
-  source: string | GNode;
-  target: string | GNode;
+function ruCount(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return `${n} ${one}`;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return `${n} ${few}`;
+  return `${n} ${many}`;
+}
+
+function sourceLabel(src: string): string {
+  const s = (src || "").toLowerCase();
+  if (s === "instagram") return "Instagram";
+  if (s === "youtube") return "YouTube";
+  if (s === "pdf") return "PDF";
+  if (s === "article") return "Статья";
+  if (s === "note") return "Заметка";
+  return src || "Материал";
+}
+
+function formatDate(iso?: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("ru-RU", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function lodLabel(lod: AtlasLodLevel): string {
+  if (lod === 1) return "Макро";
+  if (lod === 2) return "Мезо";
+  return "Микро";
+}
+
+function shortSubclusterName(label: string, category: string | null): string {
+  if (category && label.startsWith(`${category} · `)) {
+    return label.slice(category.length + 3);
+  }
+  return label;
+}
+
+type RelatedNeighbor = {
+  node: GraphNode;
   reason: string;
-  weight?: number;
-  label?: string | null;
+  badge: string | null;
   similarity?: number | null;
 };
 
-function isMaterialLink(reason: string): boolean {
-  return reason === "semantic" || reason === "shared_tool";
-}
-
-function linkReasonLabel(link: Pick<GLink, "reason" | "label" | "similarity">): string {
-  if (link.reason === "shared_tool") {
-    return link.label ? `Инструменты: ${link.label}` : "Общие инструменты";
-  }
-  if (link.reason === "semantic") {
-    const pct = link.similarity != null ? ` ${Math.round(link.similarity * 100)}%` : "";
-    return `По смыслу${pct}`;
-  }
-  return link.reason;
-}
-
-function linkEnds(l: GLink): [string, string] {
-  const s = typeof l.source === "object" ? l.source.id : l.source;
-  const t = typeof l.target === "object" ? l.target.id : l.target;
-  return [s, t];
-}
-
-function isTopic(n: { type: string }) {
-  return n.type === "tag" || n.type === "category";
-}
-
-function nodeRadius(n: GNode): number {
-  if (n.type === "category") return 8 + Math.min(10, n.degree * 0.7);
-  if (n.type === "tag") return 5 + Math.min(8, n.degree * 0.55);
-  return 2.4 + Math.min(3.2, n.degree * 0.22);
-}
-
-function ruLinks(n: number): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return `${n} связь`;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} связи`;
-  return `${n} связей`;
-}
-
-function clampTooltip(x: number, y: number, w: number, h: number) {
-  const pad = 12;
-  const tw = 240;
-  const th = 72;
-  let left = x + 16;
-  let top = y + 16;
-  if (left + tw > w - pad) left = x - tw - 12;
-  if (top + th > h - pad) top = y - th - 12;
-  if (left < pad) left = pad;
-  if (top < pad) top = pad;
-  return { left, top };
-}
-
-/**
- * Obsidian-style graph:
- * - all nodes visible at once
- * - force simulation always runs (nodes move)
- * - click = select + zoom to node
- * - double-click material = open page
- * - Esc / «Ко всем» = zoom to fit whole graph
- */
 export default function GraphPage() {
   const router = useRouter();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fgRef = useRef<any>(null);
-  const fittedRef = useRef(false);
-  const lastClickRef = useRef<{ id: string; t: number } | null>(null);
-  const stageRef = useRef<HTMLDivElement>(null);
-  const posRef = useRef(new Map<string, { x: number; y: number; vx?: number; vy?: number }>());
-  const forcesInited = useRef(false);
-  const prevFilterKey = useRef("");
-  const [layoutReady, setLayoutReady] = useState(false);
+  const atlasRef = useRef<KnowledgeAtlasHandle>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchWrapRef = useRef<HTMLDivElement>(null);
+  const filtersWrapRef = useRef<HTMLDivElement>(null);
+  const focusAppliedRef = useRef<string | null>(null);
 
   const [raw, setRaw] = useState<GraphPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [size, setSize] = useState({ w: 800, h: 640 });
-  const [hover, setHover] = useState<GNode | null>(null);
+
+  // Selection & hover state
+  const [selectedClusterId, setSelectedClusterId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [hoveredClusterId, setHoveredClusterId] = useState<string | null>(null);
+  const [isolateEgo, setIsolateEgo] = useState(false);
+
+  // HUD & view controls
+  const [viewMode, setViewMode] = useState<AtlasViewMode>("clusters");
+  const [lod, setLod] = useState<AtlasLodLevel>(1);
+  const [legendOpen, setLegendOpen] = useState(false);
+  const [clusterSort, setClusterSort] = useState<"score" | "recent">("score");
+
+  // Search & Facet filters
   const [q, setQ] = useState("");
-  const [sheet, setSheet] = useState<GNode | null>(null);
-  const [filtersOpen, setFiltersOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const searchWrapRef = useRef<HTMLDivElement>(null);
-  const focusDoneRef = useRef<string | null>(null);
-  const [category, setCategory] = useState("");
-  const [tag, setTag] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [toolFilter, setToolFilter] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
   const [minScore, setMinScore] = useState(0);
-  const [showSemanticLinks, setShowSemanticLinks] = useState(true);
-  const [pointer, setPointer] = useState({ x: 0, y: 0 });
-  const [forcesReady, setForcesReady] = useState(0);
-  const [coarsePointer, setCoarsePointer] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const g = await client.graph();
-      // Clone so force-graph cannot mutate payload links/nodes in place
-      setRaw({
-        nodes: g.nodes.map((n) => ({ ...n })),
-        links: g.links.map((l) => ({
-          source: typeof l.source === "string" ? l.source : String(l.source),
-          target: typeof l.target === "string" ? l.target : String(l.target),
-          reason: l.reason,
-          weight: l.weight,
-          label: l.label ?? null,
-          similarity: l.similarity ?? null,
-        })),
-      });
+      const payload = await client.graph();
+      setRaw(payload);
       setError(null);
-      fittedRef.current = false;
-      forcesInited.current = false;
-      setLayoutReady(false);
-      posRef.current.clear();
-      prevFilterKey.current = "";
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Ошибка графа");
+      setError(e instanceof Error ? e.message : "Не удалось загрузить атлас");
     }
   }, []);
 
@@ -148,806 +120,1335 @@ export default function GraphPage() {
     load();
   }, [load]);
 
-  useEffect(() => {
-    function measure() {
-      setSize({ w: window.innerWidth, h: window.innerHeight });
-    }
-    measure();
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, []);
+  const clusters = useMemo<GraphCluster[]>(() => raw?.clusters ?? [], [raw]);
+  const nodes = useMemo<GraphNode[]>(() => raw?.nodes ?? [], [raw]);
+  const edges = useMemo<GraphEdge[]>(
+    () => raw?.edges ?? raw?.links ?? [],
+    [raw]
+  );
+  const clusterEdges = useMemo(() => raw?.cluster_edges ?? [], [raw]);
+  const meta = raw?.meta ?? null;
 
-  useEffect(() => {
-    const mq = window.matchMedia("(pointer: coarse)");
-    const sync = () => setCoarsePointer(mq.matches);
-    sync();
-    mq.addEventListener("change", sync);
-    return () => mq.removeEventListener("change", sync);
-  }, []);
+  const clusterById = useMemo(() => {
+    const m = new Map<string, GraphCluster>();
+    for (const c of clusters) m.set(c.id, c);
+    return m;
+  }, [clusters]);
 
   const nodeById = useMemo(() => {
-    const m = new Map<string, GraphPayload["nodes"][number]>();
-    if (!raw) return m;
-    for (const n of raw.nodes) m.set(n.id, n);
+    const m = new Map<string, GraphNode>();
+    for (const n of nodes) m.set(n.id, n);
     return m;
-  }, [raw]);
+  }, [nodes]);
 
-  const adjacency = useMemo(() => {
-    const map = new Map<string, Set<string>>();
-    if (!raw) return map;
-    for (const l of raw.links) {
-      const [s, t] = linkEnds(l as GLink);
-      if (!map.has(s)) map.set(s, new Set());
-      if (!map.has(t)) map.set(t, new Set());
-      map.get(s)!.add(t);
-      map.get(t)!.add(s);
-    }
-    return map;
-  }, [raw]);
+  // Facet options from backend meta.facets
+  const categoryOptions = useMemo(() => {
+    const items = meta?.facets?.categories ?? [];
+    return [
+      { value: "", label: "Все категории" },
+      ...items.map((f) => ({ value: f.key, label: `${f.label} (${f.count})` })),
+    ];
+  }, [meta]);
 
-  const categories = useMemo(
-    () =>
-      raw
-        ? Array.from(new Set(raw.nodes.filter((n) => n.type === "category").map((n) => n.title))).sort()
-        : [],
-    [raw]
-  );
-  const tags = useMemo(
-    () =>
-      raw ? Array.from(new Set(raw.nodes.filter((n) => n.type === "tag").map((n) => n.title))).sort() : [],
-    [raw]
-  );
+  const toolOptions = useMemo(() => {
+    const items = meta?.facets?.tools ?? [];
+    return [
+      { value: "", label: "Все инструменты" },
+      ...items.map((f) => ({ value: f.key, label: `${f.label} (${f.count})` })),
+    ];
+  }, [meta]);
 
-  // Stable topology — filters never add/remove nodes from the simulation
-  const graphData = useMemo(() => {
-    if (!raw) return { nodes: [] as GNode[], links: [] as GLink[] };
+  const tagOptions = useMemo(() => {
+    const items = meta?.facets?.tags ?? [];
+    return [
+      { value: "", label: "Все теги" },
+      ...items.map((f) => ({ value: f.key, label: `${f.label} (${f.count})` })),
+    ];
+  }, [meta]);
 
-    const nodes: GNode[] = raw.nodes.map((n) => {
-      const val = isTopic(n) ? 8 + Math.min(16, n.degree) : 2 + Math.min(6, n.degree);
-      return { ...n, val };
-    });
+  const sourceOptions = useMemo(() => {
+    const items = meta?.facets?.source_types ?? [];
+    return [
+      { value: "", label: "Все источники" },
+      ...items.map((f) => ({
+        value: f.key,
+        label: `${sourceLabel(f.label)} (${f.count})`,
+      })),
+    ];
+  }, [meta]);
 
-    const ids = new Set(nodes.map((n) => n.id));
-    const links: GLink[] = [];
-    for (const l of raw.links) {
-      const [s, t] = linkEnds(l as GLink);
-      if (!ids.has(s) || !ids.has(t)) continue;
-      const a = nodeById.get(s);
-      const b = nodeById.get(t);
-      if (!a || !b) continue;
-      if (a.type === "material" || b.type === "material") {
-        links.push({
-          source: s,
-          target: t,
-          reason: l.reason,
-          weight: l.weight,
-          label: l.label ?? null,
-          similarity: l.similarity ?? null,
-        });
-        continue;
+  const activeFilterCount =
+    (categoryFilter ? 1 : 0) +
+    (toolFilter ? 1 : 0) +
+    (tagFilter ? 1 : 0) +
+    (sourceFilter ? 1 : 0) +
+    (minScore > 0 ? 1 : 0);
+
+  const hasActiveFilter = activeFilterCount > 0;
+
+  const matchedNodeIds = useMemo(() => {
+    const out = new Set<string>();
+    const catKey = categoryFilter.toLowerCase();
+    const toolKey = toolFilter.toLowerCase();
+    const tagKey = tagFilter.toLowerCase();
+    const srcKey = sourceFilter.toLowerCase();
+
+    for (const n of nodes) {
+      if (catKey) {
+        if (catKey === "__uncategorized__") {
+          if (n.category && n.cluster_id !== "cluster:uncategorized") continue;
+        } else if ((n.category || "").toLowerCase() !== catKey) {
+          continue;
+        }
       }
-      if (isTopic(a) && isTopic(b) && (l.reason === "belongs" || l.reason === "cooccur")) {
-        links.push({ source: s, target: t, reason: l.reason, weight: l.weight });
+      if (toolKey) {
+        const hasTool = (n.tools || []).some(
+          (t) => t.toLowerCase() === toolKey
+        );
+        if (!hasTool) continue;
       }
-    }
-
-    return { nodes, links };
-  }, [raw, nodeById]);
-
-  // Visibility only — layout coords stay put when filters change
-  const visibleIds = useMemo(() => {
-    if (!raw) return new Set<string>();
-    const qLower = q.trim().toLowerCase();
-    const filtering = Boolean(qLower || category || tag || minScore);
-    if (!filtering) return new Set(raw.nodes.map((n) => n.id));
-
-    const keep = new Set<string>();
-    for (const n of raw.nodes) {
-      if (n.type !== "material") continue;
-      if (minScore > 0 && (n.score ?? 0) < minScore) continue;
-      if (category && (n.category || "").toLowerCase() !== category.toLowerCase()) continue;
-      if (tag && !(n.tags || []).some((t) => t.toLowerCase() === tag.toLowerCase())) continue;
-      if (
-        qLower &&
-        !n.title.toLowerCase().includes(qLower) &&
-        !(n.summary || "").toLowerCase().includes(qLower)
-      ) {
-        continue;
+      if (tagKey) {
+        const hasTag = (n.tags || []).some((t) => t.toLowerCase() === tagKey);
+        if (!hasTag) continue;
       }
-      keep.add(n.id);
-    }
-    for (const id of [...keep]) {
-      for (const nb of adjacency.get(id) || []) {
-        const tn = nodeById.get(nb);
-        if (tn && isTopic(tn)) keep.add(nb);
+      if (srcKey) {
+        if ((n.source_type || "").toLowerCase() !== srcKey) continue;
       }
-    }
-    if (qLower) {
-      for (const n of raw.nodes) {
-        if (isTopic(n) && n.title.toLowerCase().includes(qLower)) keep.add(n.id);
+      if (minScore > 0) {
+        if (n.type !== "client" && (n.score ?? -1) < minScore) continue;
       }
-    }
-    if (category) keep.add(`cat:${category.toLowerCase()}`);
-    if (tag) keep.add(`tag:${tag.toLowerCase()}`);
-    return keep;
-  }, [raw, q, category, tag, minScore, adjacency, nodeById]);
-
-  const isFiltered = visibleIds.size < graphData.nodes.length;
-  const filterKey = `${q}|${category}|${tag}|${minScore}`;
-
-  useEffect(() => {
-    const fg = fgRef.current;
-    if (!fg || graphData.nodes.length === 0) return;
-
-    const charge = fg.d3Force("charge");
-    if (charge?.strength) {
-      charge.strength((node: GNode) => {
-        if (node.type === "category") return -160;
-        if (node.type === "tag") return -90;
-        return -40;
-      });
-      if (charge.distanceMax) charge.distanceMax(260);
-    }
-
-    const link = fg.d3Force("link");
-    if (link?.distance) {
-      link.distance((l: GLink) => {
-        const [a, b] = linkEnds(l);
-        const na = nodeById.get(a);
-        const nb = nodeById.get(b);
-        if (na && nb && na.type === "category" && nb.type === "tag") return 48;
-        if (na && nb && na.type === "tag" && nb.type === "category") return 48;
-        if (na && nb && isTopic(na) && isTopic(nb)) return 42;
-        return 28;
-      });
-      if (link.strength) {
-        link.strength((l: GLink) => (l.reason === "belongs" ? 0.95 : 0.55));
-      }
-    }
-
-    fg.d3Force(
-      "collide",
-      forceCollide((n: GNode) => nodeRadius(n) + (isTopic(n) ? 6 : 3)).strength(0.9)
-    );
-
-    const center = fg.d3Force("center");
-    if (center?.strength) center.strength(0.08);
-
-    if (!forcesInited.current) {
-      forcesInited.current = true;
-      fg.d3ReheatSimulation?.();
-    }
-  }, [graphData.nodes.length, graphData.links.length, forcesReady, nodeById]);
-
-  function zoomToVisible(ms = 420) {
-    const fg = fgRef.current;
-    if (!fg) return;
-    const pts = graphData.nodes.filter((n) => visibleIds.has(n.id) && n.x != null && n.y != null);
-    if (pts.length === 0) return;
-    if (!isFiltered) {
-      fg.zoomToFit?.(ms, 100);
-      return;
-    }
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-    for (const n of pts) {
-      minX = Math.min(minX, n.x!);
-      maxX = Math.max(maxX, n.x!);
-      minY = Math.min(minY, n.y!);
-      maxY = Math.max(maxY, n.y!);
-    }
-    const pad = 80;
-    const w = Math.max(40, maxX - minX + pad * 2);
-    const h = Math.max(40, maxY - minY + pad * 2);
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    const zoom = Math.min(size.w / w, size.h / h, 3.2);
-    fg.centerAt(cx, cy, ms);
-    fg.zoom(Math.max(0.45, zoom), ms);
-  }
-
-  // Soft camera frame when filters change — never reheat
-  useEffect(() => {
-    if (prevFilterKey.current === filterKey) return;
-    prevFilterKey.current = filterKey;
-    if (!layoutReady || graphData.nodes.length === 0) return;
-    const t = window.setTimeout(() => zoomToVisible(420), 40);
-    return () => window.clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on filter identity
-  }, [filterKey, layoutReady]);
-
-  const hoverSet = useMemo(() => {
-    if (!hover) return null;
-    const set = new Set<string>([hover.id]);
-    for (const id of adjacency.get(hover.id) || []) {
-      if (visibleIds.has(id)) set.add(id);
-    }
-    return set;
-  }, [hover, adjacency, visibleIds]);
-
-    const neighborsOfSheet = useMemo(() => {
-    if (!sheet || !raw) return [];
-    const ids = adjacency.get(sheet.id) || new Set();
-    const seen = new Set<string>();
-    const out: GraphPayload["nodes"][number][] = [];
-    for (const n of raw.nodes) {
-      if (!ids.has(n.id) || n.type !== "material") continue;
-      const key = n.title.trim().toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(n);
+      out.add(n.id);
     }
     return out;
-  }, [sheet, adjacency, raw]);
+  }, [nodes, categoryFilter, toolFilter, tagFilter, sourceFilter, minScore]);
 
-  const relatedMaterialsOfSheet = useMemo(() => {
-    if (!sheet || !raw || sheet.type !== "material") return [];
-    const out: { node: GraphPayload["nodes"][number]; reason: string; badge: string }[] = [];
-    const seen = new Set<string>();
-    for (const l of raw.links) {
-      if (!isMaterialLink(l.reason)) continue;
-      const [s, t] = linkEnds(l as GLink);
-      const otherId = s === sheet.id ? t : t === sheet.id ? s : null;
-      if (!otherId) continue;
-      const key = `${otherId}:${l.reason}`;
-      if (seen.has(key)) continue;
-      const other = nodeById.get(otherId);
-      if (!other || other.type !== "material") continue;
-      seen.add(key);
-      out.push({ node: other, reason: l.reason, badge: linkReasonLabel(l) });
-    }
-    return out.slice(0, 8);
-  }, [sheet, raw, nodeById]);
-
-  function zoomToFit() {
-    fittedRef.current = true;
-    zoomToVisible(700);
-  }
-
-  function cameraTo(node: GNode, zoom: number, ms = 550) {
-    if (!fgRef.current || node.x == null || node.y == null) return;
-    fgRef.current.centerAt(node.x, node.y, ms);
-    fgRef.current.zoom(zoom, ms);
-  }
-
-  function selectNode(n: GNode) {
-    const now = Date.now();
-    const prev = lastClickRef.current;
-    lastClickRef.current = { id: n.id, t: now };
-    if (prev && prev.id === n.id && now - prev.t < 320 && n.type === "material") {
-      router.push(`/m/${n.id}`);
-      return;
-    }
-    setSheet(n);
-    cameraTo(n, isTopic(n) ? 1.85 : 2.35, 550);
-  }
-
-  function focusSearch(query = "") {
-    setFiltersOpen(false);
-    if (query) setQ(query);
-    setSearchOpen(true);
-    window.requestAnimationFrame(() => {
-      const el = searchInputRef.current;
-      if (!el) return;
-      el.focus();
-      if (query) {
-        const len = el.value.length;
-        el.setSelectionRange(len, len);
-      }
-    });
-  }
-
-  const searchHits = useMemo(
-    () => (searchOpen && q.trim() ? searchGraphNodes(graphData.nodes, q, 8) : []),
-    [searchOpen, q, graphData.nodes]
+  // Search dropdown hits (clusters + nodes)
+  const searchClusterHits = useMemo(
+    () => (q.trim().length >= 1 ? searchGraphClusters(clusters, q, 4) : []),
+    [clusters, q]
+  );
+  const searchNodeHits = useMemo(
+    () => (q.trim().length >= 1 ? searchGraphNodes(nodes, q, 8) : []),
+    [nodes, q]
   );
 
-  // Deep-link: /graph?focus=<nodeId>
-  useEffect(() => {
-    if (!layoutReady || !raw) return;
-    const id = new URLSearchParams(window.location.search).get("focus");
-    if (!id || focusDoneRef.current === id) return;
-    const node = graphData.nodes.find((n) => n.id === id);
-    if (!node) return;
-    focusDoneRef.current = id;
-    // Wait a tick so coords exist after layout
-    const t = window.setTimeout(() => selectNode(node), 80);
-    return () => window.clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- run when layout/raw ready for a given focus id
-  }, [layoutReady, raw, graphData.nodes]);
+  // Handlers
+  const handleSelectCluster = useCallback((clusterId: string) => {
+    setSelectedNodeId(null);
+    setIsolateEgo(false);
+    setSelectedClusterId(clusterId);
+    setSearchOpen(false);
+    setFiltersOpen(false);
+    requestAnimationFrame(() => {
+      atlasRef.current?.focusCluster(clusterId);
+    });
+  }, []);
 
-  useEffect(() => {
-    if (!searchOpen) return;
-    function onPointer(e: MouseEvent) {
-      const t = e.target as Node;
-      if (searchWrapRef.current?.contains(t)) return;
+  const handleSelectNode = useCallback(
+    (nodeId: string, opts?: { focus?: boolean }) => {
+      const node = nodeById.get(nodeId);
+      setSelectedNodeId(nodeId);
+      setIsolateEgo(false);
+      if (node?.cluster_id) {
+        setSelectedClusterId(node.cluster_id);
+      }
       setSearchOpen(false);
+      setFiltersOpen(false);
+      if (opts?.focus !== false) {
+        requestAnimationFrame(() => {
+          atlasRef.current?.focusNode(nodeId);
+        });
+      }
+    },
+    [nodeById]
+  );
+
+  const handleOpenNode = useCallback(
+    (node: GraphNode) => {
+      if (node.type === "client") {
+        router.push(`/clients/${node.id}`);
+      } else {
+        router.push(`/m/${node.id}`);
+      }
+    },
+    [router]
+  );
+
+  const handleOverview = useCallback(() => {
+    setSelectedNodeId(null);
+    setSelectedClusterId(null);
+    setIsolateEgo(false);
+    setSearchOpen(false);
+    setFiltersOpen(false);
+    requestAnimationFrame(() => {
+      atlasRef.current?.fitOverview(false);
+    });
+  }, []);
+
+  const handleClearSelection = useCallback(() => {
+    if (selectedNodeId) {
+      setSelectedNodeId(null);
+      setIsolateEgo(false);
+    } else if (selectedClusterId) {
+      setSelectedClusterId(null);
     }
-    document.addEventListener("mousedown", onPointer);
-    return () => document.removeEventListener("mousedown", onPointer);
-  }, [searchOpen]);
+    setSearchOpen(false);
+    setFiltersOpen(false);
+  }, [selectedNodeId, selectedClusterId]);
 
-  function clearSelection() {
-    setSheet(null);
-    zoomToFit();
-  }
+  const clearFilters = useCallback(() => {
+    setCategoryFilter("");
+    setToolFilter("");
+    setTagFilter("");
+    setSourceFilter("");
+    setMinScore(0);
+  }, []);
 
+  // Deep link /graph?focus=<id>
+  useEffect(() => {
+    if (!raw || typeof window === "undefined") return;
+    const focus = new URLSearchParams(window.location.search).get("focus");
+    if (!focus || focusAppliedRef.current === focus) return;
+    if (nodeById.has(focus)) {
+      focusAppliedRef.current = focus;
+      handleSelectNode(focus, { focus: true });
+    } else if (clusterById.has(focus)) {
+      focusAppliedRef.current = focus;
+      handleSelectCluster(focus);
+    }
+  }, [raw, nodeById, clusterById, handleSelectNode, handleSelectCluster]);
+
+  // Close popovers on outside click
+  useEffect(() => {
+    function onDocDown(e: MouseEvent) {
+      const target = e.target as Node;
+      if (searchOpen && !searchWrapRef.current?.contains(target)) {
+        setSearchOpen(false);
+      }
+      if (
+        filtersOpen &&
+        !filtersWrapRef.current?.contains(target) &&
+        !(target as Element | null)?.closest?.(".fancy-select-menu")
+      ) {
+        setFiltersOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocDown);
+    return () => document.removeEventListener("mousedown", onDocDown);
+  }, [searchOpen, filtersOpen]);
+
+  // Keyboard shortcuts: / search, Esc step-back, F overview, +/- zoom
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") clearSelection();
+      const target = e.target as HTMLElement | null;
+      const inInput =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+
+      if (e.key === "/" && !inInput) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        setSearchOpen(true);
+        return;
+      }
+      if (e.key === "Escape") {
+        if (searchOpen) {
+          setSearchOpen(false);
+          searchInputRef.current?.blur();
+        } else if (filtersOpen) {
+          setFiltersOpen(false);
+        } else if (selectedNodeId) {
+          setSelectedNodeId(null);
+          setIsolateEgo(false);
+        } else if (selectedClusterId) {
+          setSelectedClusterId(null);
+          atlasRef.current?.fitOverview(false);
+        }
+        return;
+      }
+      if (inInput) return;
+
+      if (e.key === "f" || e.key === "F" || e.key === "а" || e.key === "А") {
+        e.preventDefault();
+        handleOverview();
+      } else if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        atlasRef.current?.zoomBy(1.3);
+      } else if (e.key === "-") {
+        e.preventDefault();
+        atlasRef.current?.zoomBy(1 / 1.3);
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, [searchOpen, filtersOpen, selectedNodeId, selectedClusterId, handleOverview]);
 
-  const empty = raw && graphData.nodes.length === 0;
-  const noMatches = Boolean(raw && graphData.nodes.length > 0 && visibleIds.size === 0);
-  const activeFilters = Boolean(q || category || tag || minScore);
+  // Derived Inspector Data
+  const selectedNode = selectedNodeId ? nodeById.get(selectedNodeId) ?? null : null;
+  const selectedCluster = selectedClusterId
+    ? clusterById.get(selectedClusterId) ?? null
+    : null;
+  const inspectorOpen = Boolean(selectedNode || selectedCluster);
+
+  const siblingSubclusters = useMemo(() => {
+    if (!selectedCluster?.category) return [];
+    const list = clusters.filter(
+      (c) => c.category === selectedCluster.category
+    );
+    return list.length > 1
+      ? [...list].sort((a, b) => b.count - a.count)
+      : [];
+  }, [clusters, selectedCluster]);
+
+  const clusterMaterials = useMemo(() => {
+    if (!selectedCluster) return [];
+    const list = nodes.filter(
+      (n) =>
+        n.cluster_id === selectedCluster.id &&
+        (!hasActiveFilter || matchedNodeIds.has(n.id))
+    );
+    if (clusterSort === "recent") {
+      return [...list].sort((a, b) =>
+        (b.created_at || "").localeCompare(a.created_at || "")
+      );
+    }
+    return [...list].sort(
+      (a, b) =>
+        (b.score ?? -1) - (a.score ?? -1) ||
+        b.degree - a.degree ||
+        a.title.localeCompare(b.title, "ru")
+    );
+  }, [nodes, selectedCluster, hasActiveFilter, matchedNodeIds, clusterSort]);
+
+  const groupedNeighbors = useMemo(() => {
+    if (!selectedNode) return null;
+    const groups: {
+      shared_tool: RelatedNeighbor[];
+      semantic: RelatedNeighbor[];
+      client: RelatedNeighbor[];
+      link: RelatedNeighbor[];
+    } = {
+      shared_tool: [],
+      semantic: [],
+      client: [],
+      link: [],
+    };
+    const seen = new Set<string>();
+
+    for (const e of edges) {
+      let otherId: string | null = null;
+      if (e.source === selectedNode.id) otherId = e.target;
+      else if (e.target === selectedNode.id) otherId = e.source;
+      if (!otherId) continue;
+      const other = nodeById.get(otherId);
+      if (!other) continue;
+
+      const dedupKey = `${e.reason}:${otherId}`;
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+
+      const item: RelatedNeighbor = {
+        node: other,
+        reason: e.reason,
+        similarity: e.similarity,
+        badge:
+          e.reason === "shared_tool"
+            ? e.label || "Инструмент"
+            : e.reason === "semantic" && typeof e.similarity === "number"
+              ? `${Math.round(e.similarity * 100)}%`
+              : e.reason === "client"
+                ? "Клиент"
+                : e.label || "Ссылка",
+      };
+
+      if (e.reason === "shared_tool") groups.shared_tool.push(item);
+      else if (e.reason === "semantic") groups.semantic.push(item);
+      else if (e.reason === "client") groups.client.push(item);
+      else groups.link.push(item);
+    }
+
+    groups.shared_tool.sort(
+      (a, b) => (b.node.score ?? -1) - (a.node.score ?? -1)
+    );
+    groups.semantic.sort(
+      (a, b) => (b.similarity ?? 0) - (a.similarity ?? 0)
+    );
+    groups.client.sort((a, b) =>
+      a.node.title.localeCompare(b.node.title, "ru")
+    );
+    groups.link.sort((a, b) => (b.node.score ?? -1) - (a.node.score ?? -1));
+
+    return groups;
+  }, [selectedNode, edges, nodeById]);
+
+  const toggleIsolateEgo = () => {
+    if (!selectedNode) return;
+    const next = !isolateEgo;
+    setIsolateEgo(next);
+    requestAnimationFrame(() => {
+      atlasRef.current?.focusNode(selectedNode.id, { isolate: next });
+    });
+  };
+
+  const hoveredNodeObj = hoveredNodeId ? nodeById.get(hoveredNodeId) ?? null : null;
+  const hygieneCount =
+    (meta?.uncategorized_count ?? 0) + (meta?.untagged_count ?? 0);
 
   return (
-    <section className="fixed inset-0 z-0 bg-[#000000]">
-      <div
-        ref={stageRef}
-        className="graph-stage absolute inset-0"
-        onMouseMove={(e) => {
-          const rect = stageRef.current?.getBoundingClientRect();
-          if (!rect) return;
-          setPointer({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-        }}
-      >
-        {error && <p className="absolute left-4 top-20 z-30 text-sm text-[var(--warn)]">{error}</p>}
+    <div className="relative h-[100dvh] w-full overflow-hidden bg-[#0b0e0d] text-[var(--ink)]">
+      {/* Main deterministic Knowledge Atlas Canvas */}
+      <KnowledgeAtlasCanvas
+        ref={atlasRef}
+        clusters={clusters}
+        nodes={nodes}
+        edges={edges}
+        clusterEdges={clusterEdges}
+        matchedNodeIds={matchedNodeIds}
+        hasActiveFilter={hasActiveFilter}
+        viewMode={viewMode}
+        selectedClusterId={selectedClusterId}
+        selectedNodeId={selectedNodeId}
+        hoveredNodeId={hoveredNodeId}
+        hoveredClusterId={hoveredClusterId}
+        isolateEgo={isolateEgo}
+        inspectorOpen={inspectorOpen}
+        onHoverNode={setHoveredNodeId}
+        onHoverCluster={setHoveredClusterId}
+        onSelectNode={(id) => handleSelectNode(id)}
+        onOpenNode={handleOpenNode}
+        onSelectCluster={handleSelectCluster}
+        onClearSelection={handleClearSelection}
+        onZoomStateChange={({ lod: nextLod }) => setLod(nextLod)}
+      />
 
-        {empty ? (
-          <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-            <p style={{ fontFamily: "var(--font-display)" }} className="text-3xl">
-              Карта пуста
-            </p>
-            <p className="mt-3 max-w-sm text-sm text-white/50">
-              Карта архива по тегам, категориям и общим инструментам. Сохраните материалы — появятся узлы.
-            </p>
-            <Link href="/" className="mt-6 text-[var(--accent)] hover:underline">
-              На главную →
-            </Link>
+      {/* Loading / Error / Empty states */}
+      {!raw && !error && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div className="atlas-glass rounded-full px-5 py-2.5 text-sm text-[var(--muted)]">
+            Загружаю атлас знаний…
           </div>
-        ) : (
-          <ForceGraphCanvas
-            ref={fgRef}
-            width={size.w}
-            height={size.h}
-            graphData={graphData}
-            backgroundColor="#000000"
-            nodeRelSize={3}
-            warmupTicks={0}
-            cooldownTicks={220}
-            d3AlphaDecay={0.022}
-            d3VelocityDecay={0.28}
-            enableNodeDrag
-            enablePointerInteraction
-            onEngineStop={() => {
-              if (!layoutReady) setLayoutReady(true);
-              if (!fittedRef.current && graphData.nodes.length > 0) {
-                fittedRef.current = true;
-                fgRef.current?.zoomToFit(750, 90);
-              }
-            }}
-            onRenderFramePost={() => {
-              if (forcesReady === 0 && fgRef.current) setForcesReady(1);
-              for (const n of graphData.nodes) {
-                if (n.x == null || n.y == null) continue;
-                posRef.current.set(n.id, { x: n.x, y: n.y, vx: n.vx, vy: n.vy });
-              }
-            }}
-            linkVisibility={(l: GLink) => {
-              if (!showSemanticLinks && isMaterialLink(l.reason)) return false;
-              const [a, b] = linkEnds(l);
-              return visibleIds.has(a) && visibleIds.has(b);
-            }}
-            linkColor={(l: GLink) => {
-              const [a, b] = linkEnds(l);
-              if (!visibleIds.has(a) || !visibleIds.has(b)) return "rgba(0,0,0,0)";
-              if (!showSemanticLinks && isMaterialLink(l.reason)) return "rgba(0,0,0,0)";
-              const lit = !hoverSet || (hoverSet.has(a) && hoverSet.has(b));
-              if (hoverSet && !lit) return "rgba(255,255,255,0.03)";
-              if (l.reason === "semantic") {
-                return hoverSet && lit ? "rgba(110,231,183,0.8)" : "rgba(110,231,183,0.34)";
-              }
-              if (l.reason === "shared_tool") {
-                return hoverSet && lit ? "rgba(251,191,36,0.85)" : "rgba(251,191,36,0.38)";
-              }
-              if (hoverSet && lit) return "rgba(255,255,255,0.55)";
-              if (l.reason === "belongs") return "rgba(255,255,255,0.2)";
-              if (l.reason === "tool") return "rgba(120, 200, 255, 0.28)";
-              if (l.reason === "link") return "rgba(160, 255, 180, 0.22)";
-              return "rgba(255,255,255,0.1)";
-            }}
-            linkWidth={(l: GLink) => {
-              const [a, b] = linkEnds(l);
-              if (hoverSet && hoverSet.has(a) && hoverSet.has(b)) return 1.3;
-              if (l.reason === "shared_tool" || l.reason === "semantic") return 0.9;
-              if (l.reason === "tool" || l.reason === "link") return 0.7;
-              return l.reason === "belongs" ? 0.8 : 0.4;
-            }}
-            onNodeHover={(n: GNode | null) => {
-              if (n && !visibleIds.has(n.id)) {
-                setHover(null);
-                return;
-              }
-              setHover(n || null);
-            }}
-            onNodeClick={(n: GNode) => {
-              if (!visibleIds.has(n.id)) return;
-              selectNode(n);
-            }}
-            onBackgroundClick={() => setSheet(null)}
-            nodeCanvasObject={(node: GNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
-              const n = node;
-              if (!visibleIds.has(n.id)) return;
-              const r = nodeRadius(n);
-              const hot = hover?.id === n.id || sheet?.id === n.id;
-              const topic = isTopic(n);
-              const dimmed = Boolean(hoverSet && !hoverSet.has(n.id));
+        </div>
+      )}
 
-              ctx.globalAlpha = dimmed ? 0.12 : 1;
-
-              if (topic && hot && !dimmed) {
-                const grd = ctx.createRadialGradient(n.x || 0, n.y || 0, 0, n.x || 0, n.y || 0, r * 2.8);
-                grd.addColorStop(0, "rgba(255,255,255,0.2)");
-                grd.addColorStop(1, "rgba(255,255,255,0)");
-                ctx.beginPath();
-                ctx.arc(n.x || 0, n.y || 0, r * 2.8, 0, 2 * Math.PI);
-                ctx.fillStyle = grd;
-                ctx.fill();
-              }
-
-              ctx.beginPath();
-              ctx.arc(n.x || 0, n.y || 0, r, 0, 2 * Math.PI);
-              if (n.type === "category") ctx.fillStyle = hot ? "#ffffff" : "#f2f2f2";
-              else if (n.type === "tag") ctx.fillStyle = hot ? "#ffffff" : n.degree >= 3 ? "#d0d0d0" : "#7a7a7a";
-              else ctx.fillStyle = hot ? "#e8e8e8" : "#555555";
-              ctx.fill();
-
-              const showLabel =
-                hot ||
-                (topic && (n.degree >= 2 || n.type === "category")) ||
-                (!topic && globalScale > 1.6);
-              if (showLabel && n.title && !dimmed) {
-                const fontSize = (topic ? 13 : 10.5) / globalScale;
-                ctx.font = `${topic && (n.type === "category" || n.degree >= 3) ? 600 : 400} ${fontSize}px Figtree, sans-serif`;
-                ctx.textAlign = "center";
-                ctx.textBaseline = "top";
-                const short = n.title.length > 28 ? `${n.title.slice(0, 27)}…` : n.title;
-                const fade = topic && !hot && globalScale < 0.8 ? 0.55 : 0.92;
-                ctx.fillStyle = "rgba(0,0,0,0.65)";
-                ctx.fillText(short, (n.x || 0) + 0.6 / globalScale, (n.y || 0) + r + 2.5 + 0.6 / globalScale);
-                ctx.fillStyle = `rgba(242,242,242,${fade})`;
-                ctx.fillText(short, n.x || 0, (n.y || 0) + r + 2.5);
-              }
-              ctx.globalAlpha = 1;
-            }}
-            nodePointerAreaPaint={(node: GNode, color: string, ctx: CanvasRenderingContext2D) => {
-              if (!visibleIds.has(node.id)) return;
-              // Larger hit target on touch so a finger can grab a node reliably
-              const r = nodeRadius(node) + (coarsePointer ? 14 : 7);
-              ctx.beginPath();
-              ctx.arc(node.x || 0, node.y || 0, r, 0, 2 * Math.PI);
-              ctx.fillStyle = color;
-              ctx.fill();
-            }}
-          />
-        )}
-
-        {noMatches && (
-          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
-            <p className="rounded-lg border border-white/10 bg-black/70 px-4 py-2 text-sm text-white/70 backdrop-blur-md">
-              Нет совпадений
-            </p>
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center p-4">
+          <div className="atlas-glass max-w-md rounded-2xl p-5 text-center">
+            <p className="text-sm text-[var(--warn)]">{error}</p>
+            <button
+              type="button"
+              onClick={load}
+              className="mt-3 rounded-full bg-[var(--accent)] px-4 py-1.5 text-xs font-medium text-[var(--btn-fg)]"
+            >
+              Повторить
+            </button>
           </div>
-        )}
+        </div>
+      )}
 
-        {hover && !sheet && (
-          <div
-            className="graph-hover-tip pointer-events-none absolute z-30 w-[min(220px,70vw)] rounded-md border border-white/10 bg-black/85 px-3 py-2 shadow-xl"
-            style={clampTooltip(pointer.x, pointer.y, size.w, size.h)}
-          >
-            <p className="text-[13px] font-medium leading-snug text-white">{hover.title}</p>
-            <p className="mt-1 text-[11px] text-white/50">
-              {hover.type === "material"
-                ? `${hover.source_type} · ${hover.score ?? "—"}`
-                : `${hover.type === "category" ? "категория" : "тег"} · ${ruLinks(hover.degree)}`}
-            </p>
-          </div>
-        )}
-      </div>
-
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 p-3 pt-[max(0.75rem,env(safe-area-inset-top))] md:p-4 md:pt-4 md:pr-52">
-        <div className="pointer-events-auto flex max-w-md flex-col gap-2">
-          <p className="px-1 text-[11px] leading-snug text-white/45">
-            Карта архива по тегам и материалам · общие инструменты / ссылки — отдельные связи
-          </p>
-          <div ref={searchWrapRef} className="relative">
-            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/55 px-3 py-1.5 backdrop-blur-md">
-              <input
-                ref={searchInputRef}
-                value={q}
-                onChange={(e) => {
-                  setQ(e.target.value);
-                  setSearchOpen(true);
-                }}
-                onFocus={() => setSearchOpen(true)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setSearchOpen(false);
-                    (e.target as HTMLInputElement).blur();
-                  } else if (e.key === "Enter" && searchHits[0]) {
-                    e.preventDefault();
-                    selectNode(searchHits[0]);
-                    setSearchOpen(false);
-                  }
-                }}
-                placeholder="Категория, тег или материал…"
-                className="min-w-0 flex-1 bg-transparent py-1.5 text-base text-white outline-none placeholder:text-white/35 md:text-sm"
-              />
+      {/* Top-Left Compact HUD: Search + Facet Filters + View Mode */}
+      <div className="pointer-events-none absolute top-3 left-3 right-3 z-20 flex flex-col items-start gap-2 md:top-3.5 md:left-4 md:right-auto">
+        <div className="pointer-events-auto flex w-full max-w-[460px] flex-wrap items-center gap-1.5 sm:flex-nowrap">
+          {/* Search input with live dropdown */}
+          <div ref={searchWrapRef} className="relative min-w-0 flex-1">
+            <svg
+              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--muted)]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.5-3.5" />
+            </svg>
+            <input
+              ref={searchInputRef}
+              value={q}
+              onChange={(e) => {
+                setQ(e.target.value);
+                setSearchOpen(true);
+              }}
+              onFocus={() => setSearchOpen(true)}
+              placeholder="Поиск по атласу… ( / )"
+              aria-label="Поиск по атласу знаний"
+              className="atlas-glass h-9 w-full rounded-full pl-8 pr-8 text-[13px] text-[var(--ink)] placeholder:text-[var(--muted)] focus:border-[var(--accent)] focus:outline-none"
+            />
+            {q && (
               <button
                 type="button"
-                onClick={() => setFiltersOpen((v) => !v)}
-                aria-expanded={filtersOpen}
-                aria-label="Фильтры"
-                className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                  filtersOpen || activeFilters
-                    ? "bg-[var(--accent)] text-[var(--btn-fg)]"
-                    : "bg-white/12 text-white/90 hover:bg-white/20"
-                }`}
+                onClick={() => {
+                  setQ("");
+                  searchInputRef.current?.focus();
+                }}
+                aria-label="Очистить поиск"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-[var(--muted)] hover:text-[var(--ink)]"
               >
-                Фильтры{activeFilters ? " ·" : ""}
+                ×
               </button>
-            </div>
-            {searchOpen && searchHits.length > 0 && (
-              <ul className="graph-search-hits" role="listbox" aria-label="Результаты поиска">
-                {searchHits.map((hit) => (
-                  <li key={hit.id}>
+            )}
+
+            {searchOpen &&
+              q.trim().length > 0 &&
+              (searchClusterHits.length > 0 || searchNodeHits.length > 0) && (
+                <div className="atlas-glass absolute left-0 right-0 top-[calc(100%+6px)] z-40 max-h-[60vh] overflow-y-auto rounded-2xl p-1.5 shadow-2xl">
+                  {searchClusterHits.length > 0 && (
+                    <div className="mb-1">
+                      <div className="px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--muted)]">
+                        Кластеры
+                      </div>
+                      {searchClusterHits.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => handleSelectCluster(c.id)}
+                          className="flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] transition hover:bg-white/[0.06]"
+                        >
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span
+                              className="h-2.5 w-2.5 shrink-0 rounded-full"
+                              style={{ backgroundColor: c.color }}
+                            />
+                            <span className="truncate text-[var(--ink)]">
+                              {c.label}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-[11px] text-[var(--muted)]">
+                            {c.count}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {searchNodeHits.length > 0 && (
+                    <div>
+                      <div className="px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--muted)]">
+                        Материалы и клиенты
+                      </div>
+                      {searchNodeHits.map((n) => {
+                        const c = n.cluster_id
+                          ? clusterById.get(n.cluster_id)
+                          : null;
+                        return (
+                          <button
+                            key={n.id}
+                            type="button"
+                            onClick={() => handleSelectNode(n.id)}
+                            className="flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] transition hover:bg-white/[0.06]"
+                          >
+                            <span className="flex min-w-0 items-center gap-2">
+                              {n.type === "client" ? (
+                                <span
+                                  className="h-2 w-2 shrink-0 rotate-45 bg-[var(--accent)]"
+                                  aria-hidden
+                                />
+                              ) : (
+                                <span
+                                  className="h-2 w-2 shrink-0 rounded-full"
+                                  style={{
+                                    backgroundColor: c?.color ?? "#6c7570",
+                                  }}
+                                />
+                              )}
+                              <span className="truncate text-[var(--ink)]">
+                                {n.title}
+                              </span>
+                            </span>
+                            <span className="shrink-0 text-[11px] text-[var(--muted)]">
+                              {n.type === "client"
+                                ? nodeTypeLabel(n.type)
+                                : n.score != null
+                                  ? `${n.score}/10`
+                                  : n.category || ""}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+          </div>
+
+          {/* Filters button + popover */}
+          <div ref={filtersWrapRef} className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setFiltersOpen((v) => !v);
+                setSearchOpen(false);
+              }}
+              aria-expanded={filtersOpen}
+              className={`atlas-glass flex h-9 items-center gap-1.5 rounded-full px-3.5 text-[12.5px] font-medium transition ${
+                filtersOpen || activeFilterCount > 0
+                  ? "border-[var(--accent)]/60 text-[var(--accent)]"
+                  : "text-[var(--ink)] hover:border-white/25"
+              }`}
+            >
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <path d="M3 6h18M7 12h10M10 18h4" />
+              </svg>
+              <span>Фильтры</span>
+              {activeFilterCount > 0 && (
+                <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[10px] font-semibold text-[var(--btn-fg)]">
+                  {activeFilterCount}
+                </span>
+              )}
+            </button>
+
+            {filtersOpen && (
+              <div className="atlas-glass absolute left-0 top-[calc(100%+8px)] z-40 w-[min(92vw,340px)] rounded-2xl p-3.5 shadow-2xl md:left-auto md:right-0">
+                <div className="mb-2.5 flex items-center justify-between">
+                  <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--muted)]">
+                    Фасеты атласа
+                  </span>
+                  {activeFilterCount > 0 && (
                     <button
                       type="button"
-                      role="option"
-                      className="graph-search-hit"
-                      onClick={() => {
-                        selectNode(hit);
-                        setQ(hit.title);
-                        setSearchOpen(false);
-                      }}
+                      onClick={clearFilters}
+                      className="text-[11.5px] text-[var(--accent)] hover:underline"
                     >
-                      <span className="graph-search-hit-title">{hit.title}</span>
-                      <span className="graph-search-hit-type">{nodeTypeLabel(hit.type)}</span>
+                      Сбросить
                     </button>
-                  </li>
-                ))}
-              </ul>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div className="graph-filter-field">
+                    <span className="graph-filter-label">Категория</span>
+                    <FancySelect
+                      value={categoryFilter}
+                      onChange={setCategoryFilter}
+                      options={categoryOptions}
+                      aria-label="Категория"
+                      variant="graph"
+                    />
+                  </div>
+                  <div className="graph-filter-field">
+                    <span className="graph-filter-label">Инструмент</span>
+                    <FancySelect
+                      value={toolFilter}
+                      onChange={setToolFilter}
+                      options={toolOptions}
+                      aria-label="Инструмент"
+                      variant="graph"
+                    />
+                  </div>
+                  <div className="graph-filter-field">
+                    <span className="graph-filter-label">Тег</span>
+                    <FancySelect
+                      value={tagFilter}
+                      onChange={setTagFilter}
+                      options={tagOptions}
+                      aria-label="Тег"
+                      variant="graph"
+                    />
+                  </div>
+                  <div className="graph-filter-field">
+                    <span className="graph-filter-label">Источник</span>
+                    <FancySelect
+                      value={sourceFilter}
+                      onChange={setSourceFilter}
+                      options={sourceOptions}
+                      aria-label="Источник"
+                      variant="graph"
+                    />
+                  </div>
+
+                  <div className="graph-filter-field graph-filter-field--score">
+                    <span className="graph-filter-label">Оценка (Score)</span>
+                    <div className="graph-score-seg">
+                      {[
+                        { v: 0, label: "Все" },
+                        { v: 5, label: "≥ 5" },
+                        { v: 7, label: "≥ 7" },
+                        { v: 8, label: "≥ 8" },
+                      ].map((opt) => (
+                        <button
+                          key={opt.v}
+                          type="button"
+                          data-active={minScore === opt.v}
+                          onClick={() => setMinScore(opt.v)}
+                          className="graph-score-seg-item"
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
             )}
           </div>
-          {filtersOpen && (
-            <div className="graph-filters">
-              <div className="graph-filters-grid">
-                <label className="graph-filter-field">
-                  <span className="graph-filter-label">Категория</span>
-                  <FancySelect
-                    aria-label="Категория"
-                    variant="graph"
-                    value={category}
-                    onChange={setCategory}
-                    onSeekGlobal={focusSearch}
-                    seekGlobalLabel="Искать на карте"
-                    options={[
-                      { value: "", label: "Все" },
-                      ...categories.map((c) => ({ value: c, label: c })),
-                    ]}
-                  />
-                </label>
-                <label className="graph-filter-field">
-                  <span className="graph-filter-label">Тег</span>
-                  <FancySelect
-                    aria-label="Тег"
-                    variant="graph"
-                    value={tag}
-                    onChange={setTag}
-                    onSeekGlobal={focusSearch}
-                    seekGlobalLabel="Искать на карте"
-                    options={[
-                      { value: "", label: "Все" },
-                      ...tags.map((t) => ({ value: t, label: t })),
-                    ]}
-                  />
-                </label>
-                <label className="graph-filter-field graph-filter-field--score">
-                  <span className="graph-filter-label">Score</span>
-                  <div className="graph-score-seg" role="radiogroup" aria-label="Минимальный score">
-                    {[
-                      { v: 0, l: "Все" },
-                      { v: 5, l: "≥5" },
-                      { v: 7, l: "≥7" },
-                      { v: 8, l: "≥8" },
-                    ].map((s) => (
-                      <button
-                        key={s.v}
-                        type="button"
-                        role="radio"
-                        aria-checked={minScore === s.v}
-                        className="graph-score-seg-item"
-                        data-active={minScore === s.v}
-                        onClick={() => setMinScore(s.v)}
-                      >
-                        {s.l}
-                      </button>
-                    ))}
-                  </div>
-                </label>
-                <label className="graph-filter-field graph-filter-field--score">
-                  <span className="graph-filter-label">Связи материалов</span>
-                  <div className="graph-score-seg" role="radiogroup" aria-label="Связи по смыслу и инструментам">
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={showSemanticLinks}
-                      className="graph-score-seg-item"
-                      data-active={showSemanticLinks}
-                      onClick={() => setShowSemanticLinks(true)}
-                    >
-                      Смысл + стеки
-                    </button>
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={!showSemanticLinks}
-                      className="graph-score-seg-item"
-                      data-active={!showSemanticLinks}
-                      onClick={() => setShowSemanticLinks(false)}
-                    >
-                      Только темы
-                    </button>
-                  </div>
-                </label>
-              </div>
-              {activeFilters && (
+        </div>
+
+        {/* Compact Mode Switcher + Live Counter + LOD Badge */}
+        <div className="pointer-events-auto flex flex-wrap items-center gap-1.5">
+          <div
+            className="atlas-glass inline-flex items-center rounded-full p-0.5 text-[11.5px]"
+            role="tablist"
+            aria-label="Режим карты"
+          >
+            {(
+              [
+                { id: "clusters", label: "Кластеры" },
+                { id: "links", label: "Связи" },
+                {
+                  id: "hygiene",
+                  label:
+                    hygieneCount > 0
+                      ? `Неразобранное (${meta?.uncategorized_count ?? 0})`
+                      : "Неразобранное",
+                },
+              ] as { id: AtlasViewMode; label: string }[]
+            ).map((tab) => {
+              const active = viewMode === tab.id;
+              return (
                 <button
+                  key={tab.id}
                   type="button"
-                  className="graph-filters-clear"
-                  onClick={() => {
-                    setCategory("");
-                    setTag("");
-                    setMinScore(0);
-                    setQ("");
-                  }}
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setViewMode(tab.id)}
+                  className={`rounded-full px-2.5 py-1 transition ${
+                    active
+                      ? "bg-[var(--accent)]/20 font-medium text-[var(--accent)]"
+                      : "text-[var(--muted)] hover:text-[var(--ink)]"
+                  }`}
                 >
-                  Сбросить фильтры
+                  {tab.label}
                 </button>
+              );
+            })}
+          </div>
+
+          {raw && (
+            <div className="atlas-glass flex items-center gap-2 rounded-full px-3 py-1 text-[11.5px] text-[var(--muted)]">
+              <span>
+                {hasActiveFilter
+                  ? `${matchedNodeIds.size} из ${nodes.length}`
+                  : ruCount(
+                      meta?.total_materials ?? nodes.length,
+                      "материал",
+                      "материала",
+                      "материалов"
+                    )}
+                {" · "}
+                {ruCount(
+                  meta?.total_clusters ?? clusters.length,
+                  "кластер",
+                  "кластера",
+                  "кластеров"
+                )}
+              </span>
+              <span className="h-3 w-px bg-white/15" aria-hidden />
+              <span className="text-[var(--accent)]">{lodLabel(lod)}</span>
+            </div>
+          )}
+
+          {hasActiveFilter && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="atlas-glass rounded-full px-2.5 py-1 text-[11px] text-[var(--accent)] hover:border-[var(--accent)]/60"
+            >
+              Сбросить фильтры ×
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Bottom-Left Controls: Zoom (+/-), Overview (F), and Collapsible Legend */}
+      <div className="pointer-events-none absolute bottom-[calc(var(--app-tabbar-h)+0.75rem)] left-3 z-20 flex flex-col items-start gap-2 md:bottom-4 md:left-4">
+        {legendOpen && (
+          <div className="atlas-glass pointer-events-auto w-[275px] rounded-2xl p-3 text-[11.5px] text-[var(--muted)] shadow-xl">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[10.5px] font-medium uppercase tracking-[0.14em] text-[var(--ink)]">
+                Легенда атласа
+              </span>
+              <button
+                type="button"
+                onClick={() => setLegendOpen(false)}
+                className="text-sm leading-none text-[var(--muted)] hover:text-[var(--ink)]"
+                aria-label="Скрыть легенду"
+              >
+                ×
+              </button>
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-3 w-3 rounded-full border border-white/50 bg-[#7ba892]" />
+                  <span className="h-2 w-2 rounded-full bg-[#7ba892]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#7ba892]/75" />
+                </span>
+                <span>Размер точки = оценка (≥8, 5–7, &lt;5)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="ml-1 h-2.5 w-2.5 rotate-45 border border-[#f4e6cc] bg-[var(--accent)]" />
+                <span>Ромб — клиент</span>
+              </div>
+              <div className="pt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--muted)]/80">
+                1-hop связи при наведении / клике
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className="h-0.5 w-4 rounded"
+                    style={{ backgroundColor: EDGE_COLORS.shared_tool }}
+                  />
+                  Инструмент
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className="h-0.5 w-4 rounded"
+                    style={{ backgroundColor: EDGE_COLORS.semantic }}
+                  />
+                  По смыслу
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className="h-0.5 w-4 rounded"
+                    style={{ backgroundColor: EDGE_COLORS.client }}
+                  />
+                  Клиент
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className="h-0.5 w-4 rounded"
+                    style={{ backgroundColor: EDGE_COLORS.link }}
+                  />
+                  Ссылка
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="pointer-events-auto flex items-center gap-1.5">
+          <div className="atlas-glass flex items-center overflow-hidden rounded-full">
+            <button
+              type="button"
+              onClick={() => atlasRef.current?.zoomBy(1 / 1.32)}
+              aria-label="Уменьшить масштаб"
+              title="Отдалить ( - )"
+              className="flex h-8 w-8 items-center justify-center text-sm text-[var(--ink)] transition hover:bg-white/[0.07]"
+            >
+              −
+            </button>
+            <span className="h-4 w-px bg-white/10" aria-hidden />
+            <button
+              type="button"
+              onClick={() => atlasRef.current?.zoomBy(1.32)}
+              aria-label="Увеличить масштаб"
+              title="Приблизить ( + )"
+              className="flex h-8 w-8 items-center justify-center text-sm text-[var(--ink)] transition hover:bg-white/[0.07]"
+            >
+              +
+            </button>
+            <span className="h-4 w-px bg-white/10" aria-hidden />
+            <button
+              type="button"
+              onClick={handleOverview}
+              title="Показать весь атлас ( F )"
+              className="h-8 px-3 text-[12px] font-medium text-[var(--ink)] transition hover:bg-white/[0.07] hover:text-[var(--accent)]"
+            >
+              Обзор
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setLegendOpen((v) => !v)}
+            aria-expanded={legendOpen}
+            className={`atlas-glass h-8 rounded-full px-3 text-[11.5px] transition ${
+              legendOpen
+                ? "border-[var(--accent)]/60 text-[var(--accent)]"
+                : "text-[var(--muted)] hover:text-[var(--ink)]"
+            }`}
+          >
+            Легенда
+          </button>
+
+          {hoveredNodeObj && !inspectorOpen && (
+            <div className="atlas-glass hidden max-w-[320px] items-center gap-2 rounded-full px-3 py-1.5 text-[11.5px] md:flex">
+              <span className="truncate text-[var(--ink)]">
+                {hoveredNodeObj.title}
+              </span>
+              {hoveredNodeObj.score != null && (
+                <span className="shrink-0 text-[var(--accent)]">
+                  {hoveredNodeObj.score}/10
+                </span>
               )}
             </div>
           )}
         </div>
       </div>
 
-      {sheet && (
-        <aside className="graph-sheet absolute bottom-[var(--app-tabbar-h)] left-0 right-0 z-30 mx-auto flex max-h-[min(52dvh,28rem)] w-full flex-col md:bottom-6 md:left-auto md:right-4 md:max-h-[70dvh] md:w-[340px]">
-          <div className="graph-sheet-panel flex min-h-0 flex-1 flex-col overflow-hidden">
-            <div className="graph-sheet-handle md:hidden" aria-hidden />
-            <div className="graph-sheet-bar">
-              <button
-                type="button"
-                className="graph-sheet-icon"
-                aria-label="Ко всем"
-                title="Ко всем"
-                onClick={() => clearSelection()}
-              >
-                ✕
-              </button>
-              <div className="graph-sheet-center">
-                <p className="text-[10px] uppercase tracking-[0.2em] text-white/40">
-                  {sheet.type === "material"
-                    ? sheet.source_type
-                    : sheet.type === "category"
-                      ? "категория"
-                      : "тег"}
-                </p>
-                <h2
-                  className="mt-0.5 line-clamp-2 text-base leading-snug text-white md:text-lg"
-                  style={{ fontFamily: "var(--font-display)" }}
-                >
-                  {sheet.title}
-                </h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSheet(null)}
-                className="graph-sheet-back"
-              >
-                ← Назад
-              </button>
-            </div>
+      {/* Right Inspector Panel (Desktop) / Bottom Sheet (Mobile) */}
+      {inspectorOpen && (
+        <aside
+          aria-label="Инспектор атласа"
+          className="atlas-inspector fixed inset-x-2 bottom-[calc(var(--app-tabbar-h)+0.5rem)] z-30 flex max-h-[56dvh] flex-col overflow-hidden rounded-2xl md:inset-x-auto md:bottom-4 md:right-4 md:top-[4.4rem] md:max-h-none md:w-[356px]"
+        >
+          {/* Mobile drag handle indicator */}
+          <div className="mx-auto mt-2 h-1 w-9 shrink-0 rounded-full bg-white/20 md:hidden" />
 
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-              {sheet.type === "material" ? (
-                <>
-                  <p className="text-sm text-white/50">
-                    {sheet.category || "без категории"}
-                    <span className="mx-1.5 opacity-40">·</span>
-                    score {sheet.score ?? "—"}
+          {/* STATE A: NODE INSPECTOR (Material or Client) */}
+          {selectedNode ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex items-center justify-between gap-2 border-b border-white/[0.08] px-4 py-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  {selectedNode.type === "client" ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/15 px-2.5 py-0.5 text-[11px] font-medium text-[var(--accent)]">
+                      <span className="h-1.5 w-1.5 rotate-45 bg-[var(--accent)]" />
+                      Клиент
+                    </span>
+                  ) : selectedNode.cluster_id &&
+                    clusterById.get(selectedNode.cluster_id) ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleSelectCluster(selectedNode.cluster_id!)
+                      }
+                      className="inline-flex max-w-[230px] items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.04] px-2.5 py-0.5 text-[11px] text-[var(--ink)] transition hover:border-[var(--accent)]/50"
+                      title="Перейти к кластеру"
+                    >
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full"
+                        style={{
+                          backgroundColor:
+                            clusterById.get(selectedNode.cluster_id!)?.color ??
+                            "#6c7570",
+                        }}
+                      />
+                      <span className="truncate">
+                        {clusterById.get(selectedNode.cluster_id!)?.label}
+                      </span>
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-[var(--muted)]">
+                      {nodeTypeLabel(selectedNode.type)}
+                    </span>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedNodeId(null);
+                    setIsolateEgo(false);
+                  }}
+                  aria-label="Закрыть инспектор"
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/[0.06] text-sm text-[var(--muted)] hover:bg-white/[0.12] hover:text-[var(--ink)]"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3.5">
+                <div>
+                  <h2 className="text-[15.5px] font-semibold leading-snug text-[var(--ink)]">
+                    {selectedNode.title}
+                  </h2>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-[var(--muted)]">
+                    {selectedNode.score != null && (
+                      <span className="font-medium text-[var(--accent)]">
+                        Оценка {selectedNode.score}/10
+                      </span>
+                    )}
+                    {selectedNode.source_type && (
+                      <span>· {sourceLabel(selectedNode.source_type)}</span>
+                    )}
+                    {formatDate(selectedNode.created_at) && (
+                      <span>· {formatDate(selectedNode.created_at)}</span>
+                    )}
+                  </div>
+                </div>
+
+                {selectedNode.summary && (
+                  <p className="text-[12.5px] leading-relaxed text-[var(--ink)]/82">
+                    {selectedNode.summary}
                   </p>
-                  {sheet.summary && (
-                    <p className="mt-3 text-sm leading-relaxed text-white/80 line-clamp-6">{sheet.summary}</p>
-                  )}
-                  {relatedMaterialsOfSheet.length > 0 && (
-                    <div className="mt-4 border-t border-white/10 pt-3">
-                      <p className="text-[11px] uppercase tracking-[0.16em] text-white/45">
-                        Связанные материалы
-                      </p>
-                      <ul className="mt-2 space-y-1">
-                        {relatedMaterialsOfSheet.map(({ node, reason, badge }) => (
-                          <li key={`${node.id}:${reason}`}>
-                            <button
-                              type="button"
-                              className="flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-xs text-white/85 transition hover:bg-white/8 hover:text-white"
-                              onClick={() => {
-                                const target = graphData.nodes.find((x) => x.id === node.id);
-                                if (target) selectNode(target);
-                                else setSheet(node as GNode);
-                              }}
-                            >
-                              <span className="min-w-0 line-clamp-1">{node.title}</span>
-                              <span
-                                className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] ${
-                                  reason === "shared_tool"
-                                    ? "bg-amber-400/15 text-amber-300"
-                                    : "bg-emerald-400/15 text-emerald-300"
-                                }`}
-                              >
-                                {badge}
-                              </span>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+                )}
+
+                {/* Tools & Tags chips */}
+                {((selectedNode.tools && selectedNode.tools.length > 0) ||
+                  (selectedNode.tags && selectedNode.tags.length > 0)) && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {(selectedNode.tools || []).slice(0, 8).map((tool) => {
+                      const active =
+                        toolFilter.toLowerCase() === tool.toLowerCase();
+                      return (
+                        <button
+                          key={`tool-${tool}`}
+                          type="button"
+                          onClick={() =>
+                            setToolFilter(active ? "" : tool.toLowerCase())
+                          }
+                          className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                            active
+                              ? "border-[var(--accent)] bg-[var(--accent)]/20 text-[var(--accent)]"
+                              : "border-[var(--accent)]/25 bg-[var(--accent)]/[0.08] text-[var(--accent)]/90 hover:border-[var(--accent)]/60"
+                          }`}
+                        >
+                          {tool}
+                        </button>
+                      );
+                    })}
+                    {(selectedNode.tags || []).slice(0, 8).map((tg) => {
+                      const active =
+                        tagFilter.toLowerCase() === tg.toLowerCase();
+                      return (
+                        <button
+                          key={`tag-${tg}`}
+                          type="button"
+                          onClick={() =>
+                            setTagFilter(active ? "" : tg.toLowerCase())
+                          }
+                          className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                            active
+                              ? "border-white/50 bg-white/15 text-[var(--ink)]"
+                              : "border-white/12 bg-white/[0.04] text-[var(--muted)] hover:border-white/30 hover:text-[var(--ink)]"
+                          }`}
+                        >
+                          #{tg}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Primary CTA + Isolate 1-hop toggle */}
+                <div className="flex items-center gap-2">
+                  <Link
+                    href={
+                      selectedNode.type === "client"
+                        ? `/clients/${selectedNode.id}`
+                        : `/m/${selectedNode.id}`
+                    }
+                    className="flex-1 rounded-full bg-[var(--accent)] px-4 py-2 text-center text-[12.5px] font-semibold text-[var(--btn-fg)] transition hover:brightness-105"
+                  >
+                    {selectedNode.type === "client"
+                      ? "Открыть клиента"
+                      : "Открыть материал"}
+                  </Link>
                   <button
                     type="button"
-                    className="mt-5 w-full rounded-full border border-[var(--accent)] bg-[var(--accent)] px-4 py-3 text-sm font-medium text-[var(--btn-fg)] transition hover:brightness-110"
-                    onClick={() => router.push(`/m/${sheet.id}`)}
+                    onClick={toggleIsolateEgo}
+                    className={`rounded-full border px-3 py-2 text-[12px] font-medium transition ${
+                      isolateEgo
+                        ? "border-[var(--accent)] bg-[var(--accent)]/20 text-[var(--accent)]"
+                        : "border-white/14 bg-white/[0.04] text-[var(--ink)] hover:border-white/30"
+                    }`}
                   >
-                    Открыть материал
+                    {isolateEgo ? "Показать все" : "1-hop фокус"}
                   </button>
-                  <p className="mt-2 text-center text-[11px] text-white/40">
-                    Двойной клик по узлу тоже открывает карточку
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p className="text-sm text-white/50">{neighborsOfSheet.length} материалов</p>
-                  <ul className="mt-3 space-y-1">
-                    {neighborsOfSheet.slice(0, 14).map((n) => (
-                      <li key={n.id}>
-                        <button
-                          type="button"
-                          className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-white/85 transition hover:bg-white/8 hover:text-white"
-                          onClick={() => {
-                            const node = graphData.nodes.find((x) => x.id === n.id);
-                            if (node) selectNode(node);
-                            else setSheet(n as GNode);
-                          }}
-                        >
-                          <span className="min-w-0 line-clamp-2">{n.title}</span>
-                          <span className="shrink-0 text-white/35" aria-hidden>
-                            ›
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
+                </div>
+
+                {/* Grouped 1-hop Neighbors */}
+                {groupedNeighbors && (
+                  <div className="space-y-3 pt-1">
+                    {(
+                      [
+                        {
+                          key: "shared_tool" as const,
+                          title: "По инструментам",
+                          color: EDGE_COLORS.shared_tool,
+                        },
+                        {
+                          key: "semantic" as const,
+                          title: "По смыслу",
+                          color: EDGE_COLORS.semantic,
+                        },
+                        {
+                          key: "client" as const,
+                          title: "Связанные клиенты",
+                          color: EDGE_COLORS.client,
+                        },
+                        {
+                          key: "link" as const,
+                          title: "Прямые ссылки",
+                          color: EDGE_COLORS.link,
+                        },
+                      ] as const
+                    ).map((sec) => {
+                      const items = groupedNeighbors[sec.key];
+                      if (items.length === 0) return null;
+                      return (
+                        <div key={sec.key}>
+                          <div className="mb-1.5 flex items-center gap-1.5 text-[10.5px] font-medium uppercase tracking-[0.13em] text-[var(--muted)]">
+                            <span
+                              className="h-1.5 w-3 rounded-full"
+                              style={{ backgroundColor: sec.color }}
+                            />
+                            <span>
+                              {sec.title} ({items.length})
+                            </span>
+                          </div>
+                          <div className="space-y-1">
+                            {items.map((rel) => (
+                              <button
+                                key={`${sec.key}-${rel.node.id}`}
+                                type="button"
+                                onClick={() => handleSelectNode(rel.node.id)}
+                                className="flex w-full items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-white/[0.025] px-2.5 py-2 text-left transition hover:border-white/20 hover:bg-white/[0.06]"
+                              >
+                                <span className="min-w-0 truncate text-[12.5px] text-[var(--ink)]">
+                                  {rel.node.title}
+                                </span>
+                                {rel.badge && (
+                                  <span
+                                    className="shrink-0 rounded-full px-2 py-0.5 text-[10.5px]"
+                                    style={{
+                                      color: sec.color,
+                                      backgroundColor: "rgba(255,255,255,0.05)",
+                                    }}
+                                  >
+                                    {rel.badge}
+                                  </span>
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {groupedNeighbors.shared_tool.length === 0 &&
+                      groupedNeighbors.semantic.length === 0 &&
+                      groupedNeighbors.client.length === 0 &&
+                      groupedNeighbors.link.length === 0 && (
+                        <p className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-[12px] text-[var(--muted)]">
+                          Пока нет прямых связей с другими материалами.
+                        </p>
+                      )}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
+          ) : selectedCluster ? (
+            /* STATE B: CLUSTER INSPECTOR */
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex items-start justify-between gap-2 border-b border-white/[0.08] px-4 py-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="h-3 w-3 shrink-0 rounded-full"
+                      style={{ backgroundColor: selectedCluster.color }}
+                    />
+                    <h2 className="truncate text-[15px] font-semibold text-[var(--ink)]">
+                      {selectedCluster.label}
+                    </h2>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 text-[11.5px] text-[var(--muted)]">
+                    <span>
+                      {ruCount(
+                        clusterMaterials.length,
+                        "материал",
+                        "материала",
+                        "материалов"
+                      )}
+                    </span>
+                    {selectedCluster.avg_score != null && (
+                      <span>
+                        · ср. оценка{" "}
+                        <strong className="font-medium text-[var(--accent)]">
+                          {selectedCluster.avg_score.toFixed(1)}
+                        </strong>
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={handleOverview}
+                    className="rounded-full bg-white/[0.06] px-2.5 py-1 text-[11px] text-[var(--ink)] hover:bg-white/[0.12]"
+                  >
+                    Обзор
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedClusterId(null)}
+                    aria-label="Закрыть инспектор кластера"
+                    className="flex h-7 w-7 items-center justify-center rounded-full bg-white/[0.06] text-sm text-[var(--muted)] hover:bg-white/[0.12] hover:text-[var(--ink)]"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+
+              <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-3.5">
+                {/* Sibling subclusters switcher for big categories like AI */}
+                {siblingSubclusters.length > 1 && (
+                  <div>
+                    <div className="mb-1.5 text-[10.5px] font-medium uppercase tracking-[0.13em] text-[var(--muted)]">
+                      Подкластеры {selectedCluster.category} (
+                      {siblingSubclusters.length})
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {siblingSubclusters.map((sub) => {
+                        const active = sub.id === selectedCluster.id;
+                        return (
+                          <button
+                            key={sub.id}
+                            type="button"
+                            onClick={() => handleSelectCluster(sub.id)}
+                            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11.5px] transition ${
+                              active
+                                ? "border-[var(--accent)] bg-[var(--accent)]/18 font-medium text-[var(--ink)]"
+                                : "border-white/10 bg-white/[0.03] text-[var(--muted)] hover:border-white/25 hover:text-[var(--ink)]"
+                            }`}
+                          >
+                            <span
+                              className="h-2 w-2 rounded-full"
+                              style={{ backgroundColor: sub.color }}
+                            />
+                            <span>
+                              {shortSubclusterName(sub.label, sub.category)}
+                            </span>
+                            <span className="opacity-70">{sub.count}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Top tools & tags */}
+                {(selectedCluster.top_tools.length > 0 ||
+                  selectedCluster.top_tags.length > 0) && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedCluster.top_tools.slice(0, 6).map((t) => {
+                      const active = toolFilter.toLowerCase() === t.toLowerCase();
+                      return (
+                        <button
+                          key={`ctool-${t}`}
+                          type="button"
+                          onClick={() =>
+                            setToolFilter(active ? "" : t.toLowerCase())
+                          }
+                          className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                            active
+                              ? "border-[var(--accent)] bg-[var(--accent)]/20 text-[var(--accent)]"
+                              : "border-[var(--accent)]/25 bg-[var(--accent)]/[0.08] text-[var(--accent)]/90 hover:border-[var(--accent)]/60"
+                          }`}
+                        >
+                          {t}
+                        </button>
+                      );
+                    })}
+                    {selectedCluster.top_tags.slice(0, 5).map((tg) => {
+                      const active = tagFilter.toLowerCase() === tg.toLowerCase();
+                      return (
+                        <button
+                          key={`ctag-${tg}`}
+                          type="button"
+                          onClick={() =>
+                            setTagFilter(active ? "" : tg.toLowerCase())
+                          }
+                          className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                            active
+                              ? "border-white/50 bg-white/15 text-[var(--ink)]"
+                              : "border-white/12 bg-white/[0.04] text-[var(--muted)] hover:border-white/30 hover:text-[var(--ink)]"
+                          }`}
+                        >
+                          #{tg}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Sort bar + Full Material List */}
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-[10.5px] font-medium uppercase tracking-[0.13em] text-[var(--muted)]">
+                      Все материалы ({clusterMaterials.length})
+                    </span>
+                    <div className="inline-flex rounded-full bg-white/[0.05] p-0.5 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => setClusterSort("score")}
+                        className={`rounded-full px-2 py-0.5 transition ${
+                          clusterSort === "score"
+                            ? "bg-[var(--accent)]/20 text-[var(--accent)]"
+                            : "text-[var(--muted)]"
+                        }`}
+                      >
+                        По оценке
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setClusterSort("recent")}
+                        className={`rounded-full px-2 py-0.5 transition ${
+                          clusterSort === "recent"
+                            ? "bg-[var(--accent)]/20 text-[var(--accent)]"
+                            : "text-[var(--muted)]"
+                        }`}
+                      >
+                        Новые
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {clusterMaterials.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => handleSelectNode(m.id)}
+                        className="group flex w-full flex-col gap-1 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2 text-left transition hover:border-[var(--accent)]/40 hover:bg-white/[0.06]"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="line-clamp-2 text-[12.5px] leading-snug text-[var(--ink)] group-hover:text-white">
+                            {m.title}
+                          </span>
+                          {m.score != null && (
+                            <span
+                              className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10.5px] font-medium ${
+                                m.score >= 8
+                                  ? "bg-[var(--accent)]/20 text-[var(--accent)]"
+                                  : "bg-white/[0.06] text-[var(--muted)]"
+                              }`}
+                            >
+                              {m.score}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10.5px] text-[var(--muted)]">
+                          <span>{sourceLabel(m.source_type)}</span>
+                          {m.tools && m.tools.length > 0 && (
+                            <span className="truncate">
+                              · {m.tools.slice(0, 2).join(", ")}
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </aside>
       )}
-    </section>
+    </div>
   );
 }

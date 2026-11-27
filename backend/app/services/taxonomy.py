@@ -30,7 +30,11 @@ TAG_ALIASES: dict[str, str] = {
     "ai agent": "ai agents",
     "ai агент": "ai agents",
     "ai агенты": "ai agents",
+    "ии агент": "ai agents",
+    "ии агенты": "ai agents",
     "агенты ai": "ai agents",
+    "claude code": "claude code",
+    "cloud code": "claude code",
     "reels": "reels",
     "рилс": "reels",
     "рилсы": "reels",
@@ -41,8 +45,29 @@ TAG_ALIASES: dict[str, str] = {
     "шортс": "youtube shorts",
     "видеомонтаж": "видеомонтаж",
     "монтаж видео": "видеомонтаж",
+    "ai монтаж": "ai монтаж",
+    "ии монтаж": "ai монтаж",
     "анимация текста": "анимация текста",
     "text animation": "анимация текста",
+    # Category/topic parity (prevents AI vs искусственный интеллект, design vs Дизайн dupes)
+    "ии": "ai",
+    "искусственный интеллект": "ai",
+    "artificial intelligence": "ai",
+    "design": "дизайн",
+    "ui": "дизайн",
+    "ux": "дизайн",
+    "ui ux": "дизайн",
+    "dev": "программирование",
+    "development": "программирование",
+    "coding": "программирование",
+    "code": "программирование",
+    "programming": "программирование",
+    "marketing": "маркетинг",
+    "sales": "продажи",
+    "business": "бизнес",
+    "freelance": "фриланс",
+    "games": "игры",
+    "gaming": "игры",
 }
 
 TAG_DISPLAY: dict[str, str] = {
@@ -51,11 +76,40 @@ TAG_DISPLAY: dict[str, str] = {
     "gpt": "GPT",
     "chatgpt": "ChatGPT",
     "ai agents": "AI agents",
+    "claude code": "Claude Code",
+    "ai монтаж": "AI монтаж",
+    "motion": "Motion",
     "reels": "Reels",
     "tiktok": "TikTok",
     "youtube shorts": "YouTube Shorts",
     "ai": "AI",
+    "дизайн": "Дизайн",
+    "маркетинг": "Маркетинг",
+    "программирование": "Программирование",
+    "продажи": "Продажи",
+    "бизнес": "Бизнес",
+    "фриланс": "Фриланс",
+    "игры": "Игры",
 }
+
+# Format/source/meta tags kept on cards for archive filtering, but excluded from graph
+# clustering & hub construction so format labels never warp thematic clusters.
+GRAPH_META_TAGS: frozenset[str] = frozenset(
+    {
+        "reels",
+        "reference",
+        "shorts",
+        "youtube shorts",
+        "youtube",
+        "instagram",
+        "tiktok",
+        "video",
+        "видео",
+        "полезное",
+        "разное",
+        "другое",
+    }
+)
 
 CATEGORY_ALIASES: dict[str, str] = {
     "ии": "ai",
@@ -140,6 +194,35 @@ def display_category_name(raw: str, key: str | None = None) -> str:
     if cleaned:
         return cleaned[:1].upper() + cleaned[1:]
     return k[:1].upper() + k[1:]
+
+
+def is_graph_meta_tag(name: str) -> bool:
+    """True for format/source/meta tags that shouldn't drive graph clustering/hubs."""
+    key = normalize_key(name)
+    return not key or key in GRAPH_META_TAGS
+
+
+def clean_graph_tags(
+    tag_names: list[str],
+    *,
+    category_name: str | None = None,
+    include_meta: bool = False,
+) -> list[str]:
+    """Deduplicate normalized tags, drop category-mirror duplicates and optional meta tags."""
+    cat_key = normalize_category_key(category_name or "")
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in tag_names:
+        key = normalize_key(raw)
+        if not key or key in seen:
+            continue
+        if not include_meta and key in GRAPH_META_TAGS:
+            continue
+        if cat_key and key == cat_key:
+            continue
+        seen.add(key)
+        out.append(display_tag_name(raw, key))
+    return out
 
 
 @dataclass

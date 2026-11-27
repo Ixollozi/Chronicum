@@ -153,29 +153,94 @@ export type ComposerResult = {
   items?: ComposerBatchItem[];
 };
 
-export type GraphNodeType = "material" | "tag" | "category" | string;
+export type GraphNodeType = "material" | "client" | "tag" | "category" | string;
+
+export type GraphCluster = {
+  id: string;
+  label: string;
+  category: string | null;
+  color: string;
+  color_slot: string;
+  count: number;
+  avg_score: number | null;
+  x: number;
+  y: number;
+  radius: number;
+  hull: [number, number][];
+  top_tags: string[];
+  top_tools: string[];
+};
+
+export type GraphNode = {
+  id: string;
+  type: GraphNodeType;
+  title: string;
+  category: string | null;
+  cluster_id?: string | null;
+  tags: string[];
+  tools?: string[];
+  score: number | null;
+  status: string;
+  source_type: string;
+  url?: string | null;
+  summary?: string | null;
+  created_at?: string | null;
+  x?: number;
+  y?: number;
+  degree: number;
+};
+
+export type GraphEdge = {
+  source: string;
+  target: string;
+  reason: "shared_tool" | "semantic" | "link" | "client" | string;
+  weight?: number | null;
+  label?: string | null;
+  similarity?: number | null;
+};
+
+export type GraphClusterEdge = {
+  source: string;
+  target: string;
+  weight: number;
+  shared_edges: number;
+  similarity?: number | null;
+  top_tools: string[];
+};
+
+export type GraphFacetItem = {
+  key: string;
+  label: string;
+  count: number;
+};
+
+export type GraphFacets = {
+  categories: GraphFacetItem[];
+  tags: GraphFacetItem[];
+  tools: GraphFacetItem[];
+  source_types: GraphFacetItem[];
+};
+
+export type GraphMeta = {
+  total_materials: number;
+  total_nodes: number;
+  total_edges: number;
+  total_clusters: number;
+  uncategorized_count: number;
+  untagged_count: number;
+  max_degree: number;
+  median_degree: number;
+  edge_counts: Record<string, number>;
+  facets: GraphFacets;
+};
 
 export type GraphPayload = {
-  nodes: {
-    id: string;
-    type: GraphNodeType;
-    title: string;
-    category: string | null;
-    tags: string[];
-    score: number | null;
-    status: string;
-    source_type: string;
-    summary?: string | null;
-    degree: number;
-  }[];
-  links: {
-    source: string;
-    target: string;
-    reason: string;
-    weight?: number;
-    label?: string | null;
-    similarity?: number | null;
-  }[];
+  clusters?: GraphCluster[];
+  nodes: GraphNode[];
+  edges?: GraphEdge[];
+  links: GraphEdge[];
+  cluster_edges?: GraphClusterEdge[];
+  meta?: GraphMeta;
 };
 
 export type SearchFeedbackOut = {

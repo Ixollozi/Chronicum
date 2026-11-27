@@ -855,14 +855,28 @@ async def composer(
 async def graph(
     session: AsyncSession = Depends(get_session),
     light: bool = Query(default=False),
+    limit: int = Query(default=1500, ge=1, le=3000),
+    category: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    tool: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    min_score: int | None = Query(default=None, ge=0, le=10),
+    source_type: str | None = Query(default=None),
     auth: AuthContext = Depends(require_auth),
 ):
     uid = scope_user_id(auth)
     data = await build_graph(
         session,
+        limit=limit,
         include_semantic=not light,
         user_id=uid,
         scope_user=uid is not None,
+        category=category,
+        tag=tag,
+        tool=tool,
+        q=q,
+        min_score=min_score,
+        source_type=source_type,
     )
     return GraphResponse(**data)
 
