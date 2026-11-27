@@ -26,37 +26,60 @@ try:  # Optional fast linear algebra path
 except ImportError:  # pragma: no cover
     np = None  # type: ignore
 
-# Threshold above which a single category auto-splits into thematic subclusters
+# Threshold above which a single category (or uncategorized pool) auto-splits into thematic subclusters
 SUBCLUSTER_SPLIT_THRESHOLD = 25
-SUBCLUSTER_TARGET_SIZE = 24
+SUBCLUSTER_TARGET_SIZE = 18
 SUBCLUSTER_MIN_K = 2
-SUBCLUSTER_MAX_K = 5
+SUBCLUSTER_MAX_K = 18
 SUBCLUSTER_MIN_MEMBER_COUNT = 5
 
-# Chronicum Dark Archive mineral palette (no purple glow; matches map-redesign-analysis.md)
+# Chronicum Dark Archive mineral palette (16 distinct muted tones; no neon / purple glow)
 ATLAS_PALETTE: list[tuple[str, str]] = [
-    ("0", "#c4a574"),  # brass — primary / accent / clients
-    ("1", "#7ba892"),  # sage — AI agents / Claude / automation
-    ("2", "#7496b8"),  # slate blue — programming / dev
-    ("3", "#c9886b"),  # terracotta — marketing / growth / content
-    ("4", "#a3ad70"),  # olive — AI video / montage / motion
-    ("5", "#6ea3a8"),  # sea slate — design / UI / visuals
-    ("6", "#b88292"),  # dusty rose — creative / references
-    ("7", "#bfa36f"),  # ochre — business / sales / freelance
+    ("0", "#c4a574"),  # brass
+    ("1", "#7ba892"),  # sage
+    ("2", "#7496b8"),  # slate blue
+    ("3", "#c9886b"),  # terracotta
+    ("4", "#a3ad70"),  # olive
+    ("5", "#6ea3a8"),  # sea slate
+    ("6", "#b88292"),  # dusty rose
+    ("7", "#c29258"),  # warm ochre
+    ("8", "#5f9d8c"),  # verdigris
+    ("9", "#8ba2c7"),  # cerulean slate
+    ("10", "#c47670"),  # muted rust
+    ("11", "#86a870"),  # moss green
+    ("12", "#5d92a8"),  # fjord blue
+    ("13", "#b8967c"),  # sandstone
+    ("14", "#a9a362"),  # antique lichen
+    ("15", "#9d8898"),  # muted mauve-slate
 ]
 MUTED_COLOR_SLOT = "muted"
 MUTED_COLOR_HEX = "#6c7570"
+_MUTED_SUBCLUSTER_HEXES: tuple[str, ...] = (
+    "#6c7570",
+    "#7e8781",
+    "#5f6c6a",
+    "#86887d",
+    "#6d7682",
+    "#7f7872",
+)
 
-# Preferred color slot by category/theme keyword for visual stability across refreshes
+# Preferred color slot by category keyword (distinct per category for visual stability)
 _CATEGORY_SLOT_HINTS: dict[str, int] = {
+    "ai": 1,
     "программирование": 2,
     "маркетинг": 3,
     "дизайн": 5,
     "бизнес": 7,
-    "продажи": 7,
+    "продажи": 10,
     "фриланс": 6,
-    "игры": 6,
+    "игры": 12,
 }
+
+# Broad umbrella categories where cross-domain archetypes clarify subclusters;
+# narrow domain categories (Дизайн, Бизнес, Маркетинг, Продажи, ...) use contrastive tag/tool/title naming instead.
+_UMBRELLA_ARCHETYPE_CATEGORIES: frozenset[str] = frozenset(
+    {"", "ai", "неразобранное", "разное", "прочее", "общее", "other", "misc"}
+)
 
 # Generic tools/tokens that shouldn't dominate subcluster names or TF-IDF axes
 _GENERIC_CLUSTER_TOKENS: frozenset[str] = frozenset(
@@ -222,7 +245,7 @@ _THEMATIC_ARCHETYPES: list[tuple[str, str, int, tuple[str, ...]]] = [
     ),
     (
         "growth_content",
-        "Контент, SEO и лидген",
+        "Контент и SEO",
         0,
         (
             "seo",
@@ -287,6 +310,20 @@ class AtlasCluster:
     top_tags: list[str] = field(default_factory=list)
     top_tools: list[str] = field(default_factory=list)
     centroid: list[float] = field(default_factory=list)
+    color_hint: int | None = None
+
+
+def _is_uncategorized_cluster(cid: str) -> bool:
+    return cid == "cluster:uncategorized" or cid.startswith("cluster:uncategorized:")
+
+
+def _target_subcluster_k(n: int) -> int:
+    """Deterministic subcluster count without banker's rounding or a low hard cap."""
+    if n <= SUBCLUSTER_SPLIT_THRESHOLD:
+        return 1
+    if n <= 108:
+        return max(SUBCLUSTER_MIN_K, math.ceil(n / SUBCLUSTER_TARGET_SIZE))
+    return min(SUBCLUSTER_MAX_K, max(6, int(math.ceil(math.sqrt(n * 0.32)))))
 
 
 def _l2_normalize(vec: list[float]) -> list[float]:
@@ -334,16 +371,17 @@ def _item_feature_tokens(item: AtlasItem) -> Counter[str]:
     for tok in _tokenize_text((item.summary or "")[:240]):
         counts[f"kw:{tok}"] += 1
 
-    # Add light archetype signal tokens so closely related Russian/English phrasing aligns
-    blob = f"{item.title} {' '.join(clean_tags)} {' '.join(item.tools)} {(item.summary or '')[:200]}".lower().replace("ё", "е")
-    for arch_key, _label, _slot, stems in _THEMATIC_ARCHETYPES:
-        hits = sum(1 for st in stems if st in blob)
-        if hits:
-            counts[f"arch:{arch_key}"] += min(4, hits * 2)
+    # Add light archetype signal tokens only for broad umbrella categories (AI / uncategorized)
+    if item.category_key in _UMBRELLA_ARCHETYPE_CATEGORIES:
+        blob = f"{item.title} {' '.join(clean_tags)} {' '.join(item.tools)} {(item.summary or '')[:200]}".lower().replace("ё", "е")
+        for arch_key, _label, _slot, stems in _THEMATIC_ARCHETYPES:
+            hits = sum(1 for st in stems if st in blob)
+            if hits:
+                counts[f"arch:{arch_key}"] += min(4, hits * 2)
     return counts
 
 
-def _build_subcluster_matrix(items: list[AtlasItem]) -> list[list[float]]:
+def _build_subcluster_matrix(items: list[AtlasItem]) -> Any:
     """Combine L2-normalized embedding vectors + TF-IDF thematic features per item."""
     n = len(items)
     token_bags = [_item_feature_tokens(it) for it in items]
@@ -352,25 +390,52 @@ def _build_subcluster_matrix(items: list[AtlasItem]) -> list[list[float]]:
         for tok in bag:
             df[tok] += 1
 
-    # Keep informative vocabulary (df >= 2 and not in > 80% of items)
-    vocab = sorted(
-        tok
-        for tok, cnt in df.items()
-        if cnt >= 2 and cnt <= max(2, int(n * 0.85))
-    )
+    # Keep informative vocabulary (df >= 2 and not in > 85% of items); cap wide vocabs deterministically
+    max_df = max(2, int(n * 0.85))
+    vocab_cands = [tok for tok, cnt in df.items() if 2 <= cnt <= max_df]
+    if len(vocab_cands) > 160:
+        vocab_cands.sort(key=lambda t: (-df[t], t))
+        vocab = sorted(vocab_cands[:160])
+    else:
+        vocab = sorted(vocab_cands)
     tok_to_idx = {tok: i for i, tok in enumerate(vocab)}
+    idf_arr = [math.log((n + 1.0) / (df[tok] + 1.0)) + 1.0 for tok in vocab]
 
     emb_dim = max((len(it.vec) for it in items), default=0)
+    v_dim = len(vocab)
+
+    if np is not None:
+        X = np.zeros((n, emb_dim + v_dim), dtype=np.float32)
+        if emb_dim > 0:
+            for i, it in enumerate(items):
+                if len(it.vec) == emb_dim:
+                    X[i, :emb_dim] = it.vec
+            e_norms = np.linalg.norm(X[:, :emb_dim], axis=1, keepdims=True)
+            e_norms = np.where(e_norms > 1e-12, e_norms, 1.0)
+            X[:, :emb_dim] /= e_norms
+        if v_dim > 0:
+            for i, bag in enumerate(token_bags):
+                for tok, cnt in bag.items():
+                    idx = tok_to_idx.get(tok)
+                    if idx is not None:
+                        X[i, emb_dim + idx] = (1.0 + math.log(cnt)) * idf_arr[idx]
+            t_norms = np.linalg.norm(X[:, emb_dim:], axis=1, keepdims=True)
+            t_norms = np.where(t_norms > 1e-12, t_norms, 1.0)
+            X[:, emb_dim:] = (X[:, emb_dim:] / t_norms) * 1.45
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        norms = np.where(norms > 1e-12, norms, 1.0)
+        X /= norms
+        return X
+
     combined: list[list[float]] = []
     for it, bag in zip(items, token_bags):
         emb_part = _l2_normalize(it.vec) if len(it.vec) == emb_dim and emb_dim > 0 else [0.0] * emb_dim
-        tf_part = [0.0] * len(vocab)
+        tf_part = [0.0] * v_dim
         for tok, cnt in bag.items():
             idx = tok_to_idx.get(tok)
             if idx is not None:
-                idf = math.log((n + 1.0) / (df[tok] + 1.0)) + 1.0
-                tf_part[idx] = (1.0 + math.log(cnt)) * idf
-        tf_part = _l2_normalize(tf_part) if vocab else []
+                tf_part[idx] = (1.0 + math.log(cnt)) * idf_arr[idx]
+        tf_part = _l2_normalize(tf_part) if v_dim else []
         # Blend: embeddings carry broad semantics; TF-IDF tags/tools/archetypes sharpen boundaries
         vec = [v * 1.0 for v in emb_part] + [v * 1.45 for v in tf_part]
         combined.append(_l2_normalize(vec))
@@ -378,7 +443,7 @@ def _build_subcluster_matrix(items: list[AtlasItem]) -> list[list[float]]:
 
 
 def _spherical_kmeans(
-    vectors: list[list[float]],
+    vectors: Any,
     k: int,
     *,
     seed: int = 42,
@@ -390,38 +455,39 @@ def _spherical_kmeans(
     if k <= 1 or n <= k:
         return [i % max(1, k) for i in range(n)]
 
-    dim = len(vectors[0]) if vectors else 0
+    dim = len(vectors[0]) if n > 0 else 0
     if dim == 0:
         return [i % k for i in range(n)]
 
+    eff_restarts = 2 if n > 120 else restarts
+
     if np is not None:
-        X = np.asarray(vectors, dtype=np.float32)
+        X = vectors if isinstance(vectors, np.ndarray) else np.asarray(vectors, dtype=np.float32)
         best_labels: list[int] | None = None
         best_obj = -1e18
 
-        for r in range(restarts):
+        for r in range(eff_restarts):
             rng = random.Random(seed + r * 997)
             # k-means++ deterministic init using cosine distance (1 - cos)
             first = rng.randrange(n)
             centroid_indices = [first]
+            chosen_set = {first}
+            min_dists = np.maximum(0.0, 1.0 - (X @ X[first]))
             for _ in range(1, k):
-                chosen = X[centroid_indices]
-                sims = X @ chosen.T
-                max_sim = sims.max(axis=1)
-                dists = np.maximum(0.0, 1.0 - max_sim) ** 2
-                total = float(dists.sum())
+                dists_sq = min_dists * min_dists
+                total = float(dists_sq.sum())
                 if total <= 1e-12:
-                    nxt = next((idx for idx in range(n) if idx not in centroid_indices), 0)
+                    nxt = next((idx for idx in range(n) if idx not in chosen_set), 0)
                 else:
                     pick = rng.random() * total
-                    cum = 0.0
-                    nxt = n - 1
-                    for idx, d in enumerate(dists):
-                        cum += float(d)
-                        if cum >= pick:
-                            nxt = idx
-                            break
+                    cdf = np.cumsum(dists_sq)
+                    nxt = int(np.searchsorted(cdf, pick, side="left"))
+                    if nxt >= n:
+                        nxt = n - 1
                 centroid_indices.append(nxt)
+                chosen_set.add(nxt)
+                d_new = np.maximum(0.0, 1.0 - (X @ X[nxt]))
+                min_dists = np.minimum(min_dists, d_new)
 
             centroids = X[centroid_indices].copy()
             labels = np.zeros(n, dtype=np.int32)
@@ -494,11 +560,12 @@ def _spherical_kmeans(
 
 def _merge_tiny_subclusters(
     items: list[AtlasItem],
-    vectors: list[list[float]],
+    vectors: Any,
     labels: list[int],
     min_size: int = SUBCLUSTER_MIN_MEMBER_COUNT,
 ) -> list[int]:
     """Fold degenerate tiny subclusters (< min_size) into their nearest healthy sibling."""
+    is_np = np is not None and isinstance(vectors, np.ndarray)
     while True:
         groups: dict[int, list[int]] = defaultdict(list)
         for i, lbl in enumerate(labels):
@@ -512,15 +579,28 @@ def _merge_tiny_subclusters(
         if not healthy:
             break
 
-        centroids: dict[int, list[float]] = {}
-        for lbl, idxs in groups.items():
-            mean = [sum(col) / len(idxs) for col in zip(*(vectors[i] for i in idxs))]
-            centroids[lbl] = _l2_normalize(mean)
-
         target_tiny = min(tiny, key=lambda l: (len(groups[l]), l))
-        for idx in groups[target_tiny]:
-            best_h = max(healthy, key=lambda h: _dot(vectors[idx], centroids[h]))
-            labels[idx] = best_h
+        if is_np:
+            h_cents = []
+            for h in healthy:
+                mean = vectors[groups[h]].mean(axis=0)
+                norm = float(np.linalg.norm(mean))
+                h_cents.append(mean / norm if norm > 1e-12 else mean)
+            H = np.stack(h_cents, axis=0)
+            tiny_idxs = groups[target_tiny]
+            sims = vectors[tiny_idxs] @ H.T
+            best_pos = sims.argmax(axis=1).tolist()
+            for idx, pos in zip(tiny_idxs, best_pos):
+                labels[idx] = healthy[pos]
+        else:
+            centroids: dict[int, list[float]] = {}
+            for lbl in healthy:
+                idxs = groups[lbl]
+                mean = [sum(col) / len(idxs) for col in zip(*(vectors[i] for i in idxs))]
+                centroids[lbl] = _l2_normalize(mean)
+            for idx in groups[target_tiny]:
+                best_h = max(healthy, key=lambda h: _dot(vectors[idx], centroids[h]))
+                labels[idx] = best_h
 
     # Re-index deterministically 0..m-1
     order = sorted(set(labels))
@@ -532,109 +612,218 @@ def _pick_subcluster_labels(
     parent_label: str,
     groups: list[list[AtlasItem]],
 ) -> list[tuple[str, int | None]]:
-    """Assign distinct, readable Russian subcluster names + optional palette slot hint."""
-    n_groups = len(groups)
+    """Assign distinct, readable Russian subcluster names + optional palette slot hint.
+
+    Archetype names apply only to broad umbrella categories (AI, Неразобранное, ...);
+    narrow domain categories use contrastive tags/tools/title terms without parent tautology.
+    """
     all_items = [it for g in groups for it in g]
     parent_key = normalize_category_key(parent_label)
+    parent_words = set(_tokenize_text(parent_label))
+    if parent_key:
+        parent_words.add(parent_key)
+    use_archetypes = parent_key in _UMBRELLA_ARCHETYPE_CATEGORIES
 
-    # Global doc frequency of tools & clean tags inside parent category for contrastive lift
+    # Global doc frequency of tools, clean tags, and title keywords inside parent for contrastive lift
     global_tag_df: Counter[str] = Counter()
     global_tool_df: Counter[str] = Counter()
+    global_kw_df: Counter[str] = Counter()
     for it in all_items:
         for t in set(clean_graph_tags(it.tags, category_name=it.category, include_meta=False)):
             global_tag_df[normalize_key(t)] += 1
         for tool in set(normalize_key(x) for x in it.tools if x):
             if tool and tool not in _GENERIC_CLUSTER_TOKENS:
                 global_tool_df[tool] += 1
+        for kw in set(_tokenize_text(it.title)):
+            if kw not in parent_words:
+                global_kw_df[kw] += 1
 
-    # Score each (group, archetype) pair using lift over parent average
-    arch_scores: list[dict[str, float]] = []
-    global_arch_rate: dict[str, float] = {}
-    for arch_key, _label, _slot, stems in _THEMATIC_ARCHETYPES:
-        total_hits = 0
-        for it in all_items:
-            blob = f"{it.title} {' '.join(it.tags)} {' '.join(it.tools)}".lower().replace("ё", "е")
-            if any(st in blob for st in stems):
-                total_hits += 1
-        global_arch_rate[arch_key] = max(0.05, total_hits / max(1, len(all_items)))
-
-    for g in groups:
-        g_scores: dict[str, float] = {}
+    assigned_arch: dict[int, tuple[str, int | None]] = {}
+    if use_archetypes:
+        arch_scores: list[dict[str, float]] = []
+        global_arch_rate: dict[str, float] = {}
         for arch_key, _label, _slot, stems in _THEMATIC_ARCHETYPES:
-            hits = 0
-            weighted_hits = 0.0
-            for it in g:
+            total_hits = 0
+            for it in all_items:
                 blob = f"{it.title} {' '.join(it.tags)} {' '.join(it.tools)}".lower().replace("ё", "е")
-                h = sum(1 for st in stems if st in blob)
-                if h > 0:
-                    hits += 1
-                    weighted_hits += min(3, h)
-            rate = hits / max(1, len(g))
-            lift = rate / global_arch_rate[arch_key]
-            # Require meaningful presence in cluster (>= 22%) and lift
-            g_scores[arch_key] = (rate * 0.65 + (weighted_hits / max(1, len(g))) * 0.2) * (0.5 + 0.5 * lift) if rate >= 0.20 else 0.0
-        arch_scores.append(g_scores)
+                if any(st in blob for st in stems):
+                    total_hits += 1
+            global_arch_rate[arch_key] = max(0.05, total_hits / max(1, len(all_items)))
 
-    # Greedy unique assignment of archetypes by strongest score
-    assigned_arch: dict[int, tuple[str, int]] = {}
-    used_arch: set[str] = set()
-    arch_meta = {k: (lbl, slot) for k, lbl, slot, _ in _THEMATIC_ARCHETYPES}
+        for g in groups:
+            g_scores: dict[str, float] = {}
+            for arch_key, arch_label, _slot, stems in _THEMATIC_ARCHETYPES:
+                # Never allow an archetype whose wording duplicates the parent label
+                arch_words = set(_tokenize_text(arch_label))
+                if parent_words and (parent_words & arch_words):
+                    g_scores[arch_key] = 0.0
+                    continue
+                hits = 0
+                weighted_hits = 0.0
+                for it in g:
+                    blob = f"{it.title} {' '.join(it.tags)} {' '.join(it.tools)}".lower().replace("ё", "е")
+                    h = sum(1 for st in stems if st in blob)
+                    if h > 0:
+                        hits += 1
+                        weighted_hits += min(3, h)
+                rate = hits / max(1, len(g))
+                lift = rate / global_arch_rate[arch_key]
+                g_scores[arch_key] = (
+                    (rate * 0.65 + (weighted_hits / max(1, len(g))) * 0.2) * (0.5 + 0.5 * lift)
+                    if rate >= 0.20
+                    else 0.0
+                )
+            arch_scores.append(g_scores)
 
-    candidates: list[tuple[float, int, str]] = []
-    for gi, g_scores in enumerate(arch_scores):
-        for arch_key, sc in g_scores.items():
-            if sc > 0.18:
-                candidates.append((sc, gi, arch_key))
-    candidates.sort(key=lambda x: (-x[0], x[1], x[2]))
-    for _sc, gi, arch_key in candidates:
-        if gi in assigned_arch or arch_key in used_arch:
-            continue
-        assigned_arch[gi] = arch_meta[arch_key]
-        used_arch.add(arch_key)
+        used_arch: set[str] = set()
+        # Only attach palette hints on the primary AI umbrella so other pools never collide on one slot
+        arch_meta = {
+            k: (lbl, slot if parent_key == "ai" else None)
+            for k, lbl, slot, _ in _THEMATIC_ARCHETYPES
+        }
 
-    # Build final unique labels; fall back to contrastive top tag/tool for any remaining group
+        candidates: list[tuple[float, int, str]] = []
+        for gi, g_scores in enumerate(arch_scores):
+            for arch_key, sc in g_scores.items():
+                if sc > 0.18:
+                    candidates.append((sc, gi, arch_key))
+        candidates.sort(key=lambda x: (-x[0], x[1], x[2]))
+        for _sc, gi, arch_key in candidates:
+            if gi in assigned_arch or arch_key in used_arch:
+                continue
+            assigned_arch[gi] = arch_meta[arch_key]
+            used_arch.add(arch_key)
+
+    def _clean_term_for_parent(disp: str) -> str:
+        """Strip redundant parent prefix from multi-word terms (e.g. 'AI монтаж' under 'AI' -> 'Монтаж')."""
+        cleaned = disp.strip()
+        if not cleaned or not parent_key:
+            return cleaned
+        parts = cleaned.split()
+        if len(parts) >= 2:
+            head_key = normalize_key(parts[0])
+            if head_key == parent_key or head_key in parent_words:
+                tail = " ".join(parts[1:]).strip()
+                if tail and len(tail) >= 2:
+                    return tail[0].upper() + tail[1:] if tail[0].islower() else tail
+        return cleaned
+
+    def _is_redundant_with_parent(term_key: str) -> bool:
+        if not term_key:
+            return True
+        if term_key == parent_key:
+            return True
+        if parent_key and len(parent_key) >= 4 and (term_key in parent_key or parent_key in term_key):
+            return True
+        term_words = set(_tokenize_text(term_key))
+        return bool(term_words and parent_words and term_words.issubset(parent_words))
+
+    # Build final unique labels; fall back to contrastive top tag/tool/title keyword
     results: list[tuple[str, int | None]] = []
     used_labels: set[str] = set()
+    used_suffixes: set[str] = set()
     for gi, g in enumerate(groups):
         if gi in assigned_arch:
             suffix, slot_hint = assigned_arch[gi]
             label = f"{parent_label} · {suffix}"
             used_labels.add(label)
+            used_suffixes.add(suffix.casefold())
             results.append((label, slot_hint))
             continue
 
-        # Contrastive top tag/tool fallback
         local_terms: Counter[str] = Counter()
         display_map: dict[str, str] = {}
         for it in g:
             for t in clean_graph_tags(it.tags, category_name=it.category, include_meta=False):
-                k = normalize_key(t)
-                if k and k != parent_key and k not in _GENERIC_CLUSTER_TOKENS:
+                cleaned_disp = _clean_term_for_parent(display_tag_name(t, normalize_key(t)))
+                k = normalize_key(cleaned_disp)
+                if k and k not in _GENERIC_CLUSTER_TOKENS and not _is_redundant_with_parent(k):
                     local_terms[k] += 2
-                    display_map.setdefault(k, display_tag_name(t, k))
+                    display_map.setdefault(k, cleaned_disp)
             for tool in it.tools:
-                k = normalize_key(tool)
-                if k and k != parent_key and k not in _GENERIC_CLUSTER_TOKENS and len(k) >= 2:
+                cleaned_disp = _clean_term_for_parent(tool.strip())
+                k = normalize_key(cleaned_disp)
+                if k and len(k) >= 2 and k not in _GENERIC_CLUSTER_TOKENS and not _is_redundant_with_parent(k):
                     local_terms[k] += 1
-                    display_map.setdefault(k, tool.strip())
+                    display_map.setdefault(k, cleaned_disp)
 
         ranked = sorted(
             local_terms.items(),
             key=lambda kv: (
-                -(kv[1] / max(1, len(g))) * math.log((len(all_items) + 1.0) / (global_tag_df[kv[0]] + global_tool_df[kv[0]] + 1.0)),
+                -(kv[1] / max(1, len(g)))
+                * math.log((len(all_items) + 1.0) / (global_tag_df[kv[0]] + global_tool_df[kv[0]] + 1.0)),
                 -kv[1],
                 kv[0],
             ),
         )
-        picks = [display_map[k] for k, _ in ranked[:2]]
+
+        # Pick 1-2 non-overlapping display terms
+        picks: list[str] = []
+        picked_keys: set[str] = set()
+        for k, _ in ranked:
+            if len(picks) >= 2:
+                break
+            disp = display_map[k]
+            if any(k in pk or pk in k for pk in picked_keys):
+                continue
+            picks.append(disp)
+            picked_keys.add(k)
+
+        # Fallback to contrastive title keywords when tags/tools are absent or sparse
+        if not picks:
+            local_kw: Counter[str] = Counter()
+            kw_display: dict[str, str] = {}
+            for it in g:
+                for raw_tok in _TOKEN_RE.findall(it.title or ""):
+                    k = raw_tok.replace("ё", "е").replace("Ё", "Е").lower()
+                    if len(k) < 4 or k in _GENERIC_CLUSTER_TOKENS or _is_redundant_with_parent(k):
+                        continue
+                    local_kw[k] += 1
+                    kw_display.setdefault(k, raw_tok.capitalize() if raw_tok.islower() else raw_tok)
+            ranked_kw = sorted(
+                local_kw.items(),
+                key=lambda kv: (
+                    -(kv[1] / max(1, len(g)))
+                    * math.log((len(all_items) + 1.0) / (global_kw_df[kv[0]] + 1.0)),
+                    -kv[1],
+                    kv[0],
+                ),
+            )
+            picks = [kw_display[k] for k, _ in ranked_kw[:2]]
+
         if picks:
-            suffix = " и ".join(picks)
+            two_part = " и ".join(picks)
+            # Keep Macro pills crisp (<= 26 chars): prefer single sharp term when two terms overflow
+            if len(picks) >= 2 and len(f"{parent_label} · {two_part}") > 26 and picks[0].casefold() not in used_suffixes:
+                suffix = picks[0]
+            else:
+                suffix = two_part
+            # If the exact suffix was already taken, try distinct single or paired candidate
+            if suffix.casefold() in used_suffixes:
+                resolved = False
+                if len(picks) >= 2 and two_part.casefold() not in used_suffixes:
+                    suffix = two_part
+                    resolved = True
+                if not resolved and len(ranked) > 1:
+                    for alt_k, _ in ranked[1:8]:
+                        alt_single = display_map[alt_k]
+                        if len(f"{parent_label} · {alt_single}") <= 26 and alt_single.casefold() not in used_suffixes:
+                            suffix = alt_single
+                            resolved = True
+                            break
+                        alt_pair = f"{picks[0]} и {alt_single}"
+                        if alt_pair.casefold() not in used_suffixes:
+                            suffix = alt_pair
+                            resolved = True
+                            break
         else:
-            suffix = f"Инструменты и сервисы" if f"{parent_label} · Инструменты и сервисы" not in used_labels else f"Группа {gi + 1}"
+            suffix = f"Группа {gi + 1}"
+
         label = f"{parent_label} · {suffix}"
         if label in used_labels:
             label = f"{parent_label} · {suffix} #{gi + 1}"
         used_labels.add(label)
+        used_suffixes.add(suffix.casefold())
         results.append((label, None))
 
     return results
@@ -683,27 +872,143 @@ def _mean_centroid(members: list[AtlasItem]) -> list[float]:
 
 
 def _assign_cluster_colors(clusters: list[AtlasCluster], hints: dict[str, int | None]) -> None:
-    """Assign balanced mineral archive colors (muted for uncategorized)."""
+    """Assign initial balanced mineral archive colors (muted for uncategorized), avoiding duplicate hints."""
+    n_palette = len(ATLAS_PALETTE)
     used_slots: Counter[int] = Counter()
+    uncat_idx = 0
     for c in clusters:
-        if c.id == "cluster:uncategorized":
+        if _is_uncategorized_cluster(c.id):
             c.color_slot = MUTED_COLOR_SLOT
-            c.color = MUTED_COLOR_HEX
+            c.color = (
+                MUTED_COLOR_HEX
+                if c.id == "cluster:uncategorized"
+                else _MUTED_SUBCLUSTER_HEXES[uncat_idx % len(_MUTED_SUBCLUSTER_HEXES)]
+            )
+            uncat_idx += 1
             continue
+
         hint = hints.get(c.id)
-        if hint is None and c.category:
-            hint = _CATEGORY_SLOT_HINTS.get(normalize_category_key(c.category))
-        if hint is not None and 0 <= hint < len(ATLAS_PALETTE):
+        if hint is None:
+            hint = c.color_hint
+        c.color_hint = hint
+        # Honor hint only if it hasn't been used yet; otherwise pick globally least-used slot
+        if hint is not None and 0 <= hint < n_palette and used_slots[hint] == 0:
             slot_idx = hint
         else:
-            # Pick least-used slot deterministically
-            slot_idx = min(range(len(ATLAS_PALETTE)), key=lambda i: (used_slots[i], i))
+            slot_idx = min(range(n_palette), key=lambda i: (used_slots[i], i))
+        used_slots[slot_idx] += 1
+        c.color_slot, c.color = ATLAS_PALETTE[slot_idx]
+
+
+def _assign_spatial_cluster_colors(
+    clusters: list[AtlasCluster],
+    cluster_edges: list[dict[str, Any]],
+) -> None:
+    """Graph-coloring over spatially adjacent & bridge-linked clusters after layout.
+
+    Guarantees that no two neighboring clusters share the same color, while respecting
+    soft category hints whenever conflict-free and balancing palette usage globally.
+    """
+    n_c = len(clusters)
+    if n_c == 0:
+        return
+
+    n_palette = len(ATLAS_PALETTE)
+    cid_to_idx = {c.id: i for i, c in enumerate(clusters)}
+
+    # Build adjacency graph: spatially close clusters + explicit cluster bridges
+    adj: list[set[int]] = [set() for _ in range(n_c)]
+    proximity_pad = 150.0
+    for i in range(n_c):
+        ci = clusters[i]
+        for j in range(i + 1, n_c):
+            cj = clusters[j]
+            dist = math.hypot(ci.x - cj.x, ci.y - cj.y)
+            if dist < ci.radius + cj.radius + proximity_pad:
+                adj[i].add(j)
+                adj[j].add(i)
+    for ce in cluster_edges:
+        ia = cid_to_idx.get(ce["source"])
+        ib = cid_to_idx.get(ce["target"])
+        if ia is not None and ib is not None and ia != ib:
+            adj[ia].add(ib)
+            adj[ib].add(ia)
+
+    # 1. Color uncategorized clusters with neighbor-distinct muted archive shades
+    uncat_indices = [i for i, c in enumerate(clusters) if _is_uncategorized_cluster(c.id)]
+    if len(uncat_indices) == 1:
+        u = clusters[uncat_indices[0]]
+        u.color_slot = MUTED_COLOR_SLOT
+        u.color = MUTED_COLOR_HEX
+    elif len(uncat_indices) > 1:
+        uncat_assigned: dict[int, int] = {}
+        uncat_used: Counter[int] = Counter()
+        for idx in sorted(uncat_indices, key=lambda i: (-len(adj[i]), -len(clusters[i].member_ids), clusters[i].id)):
+            forbidden_u = {uncat_assigned[nb] for nb in adj[idx] if nb in uncat_assigned}
+            avail_u = [s for s in range(len(_MUTED_SUBCLUSTER_HEXES)) if s not in forbidden_u]
+            pick_u = min(avail_u or range(len(_MUTED_SUBCLUSTER_HEXES)), key=lambda s: (uncat_used[s], s))
+            uncat_assigned[idx] = pick_u
+            uncat_used[pick_u] += 1
+            clusters[idx].color_slot = MUTED_COLOR_SLOT
+            clusters[idx].color = _MUTED_SUBCLUSTER_HEXES[pick_u]
+
+    # 2. DSATUR-style greedy coloring for all regular clusters
+    reg_indices = [i for i, c in enumerate(clusters) if not _is_uncategorized_cluster(c.id)]
+    if not reg_indices:
+        return
+
+    assigned: dict[int, int] = {}
+    used_slots: Counter[int] = Counter()
+    remaining = set(reg_indices)
+
+    while remaining:
+        # Pick uncolored cluster with most distinct neighbor colors (DSATUR), then highest degree, then largest size
+        idx = max(
+            remaining,
+            key=lambda i: (
+                len({assigned[nb] for nb in adj[i] if nb in assigned}),
+                len(adj[i]),
+                len(clusters[i].member_ids),
+                -i,
+            ),
+        )
+        remaining.remove(idx)
+
+        c = clusters[idx]
+        forbidden = {assigned[nb] for nb in adj[idx] if nb in assigned}
+        available = [s for s in range(n_palette) if s not in forbidden]
+        if not available:
+            # Extreme fallback if a cluster somehow has >= n_palette distinct-color neighbors:
+            # pick color colliding with the farthest neighbor(s)
+            def _collision_cost(s: int) -> tuple[int, float, int, int]:
+                colliding_nbs = [nb for nb in adj[idx] if assigned.get(nb) == s]
+                min_d = min(
+                    (math.hypot(c.x - clusters[nb].x, c.y - clusters[nb].y) for nb in colliding_nbs),
+                    default=1e9,
+                )
+                return (len(colliding_nbs), -min_d, used_slots[s], s)
+
+            slot_idx = min(range(n_palette), key=_collision_cost)
+        else:
+            min_used = min(used_slots[s] for s in available)
+            hint = c.color_hint
+            # Prefer hint when it doesn't collide with neighbors and doesn't unbalance palette usage
+            if (
+                hint is not None
+                and hint in available
+                and used_slots[hint] <= min_used
+            ):
+                slot_idx = hint
+            else:
+                slot_idx = min(available, key=lambda s: (used_slots[s], s))
+
+        assigned[idx] = slot_idx
         used_slots[slot_idx] += 1
         c.color_slot, c.color = ATLAS_PALETTE[slot_idx]
 
 
 def build_clusters(items: list[AtlasItem]) -> tuple[list[AtlasCluster], dict[str, str]]:
-    """Group materials into balanced clusters, splitting large categories (>25) into subclusters."""
+    """Group materials into balanced clusters, splitting large categories and uncategorized (>25) into subclusters."""
     if not items:
         return [], {}
 
@@ -732,6 +1037,7 @@ def build_clusters(items: list[AtlasItem]) -> tuple[list[AtlasCluster], dict[str
             scores = [it.score for it in group if it.score is not None]
             top_tags, top_tools = _top_facets_for_members(group, category_name=cat_label)
             cid = f"cluster:{ck}"
+            hint = _CATEGORY_SLOT_HINTS.get(ck)
             clusters.append(
                 AtlasCluster(
                     id=cid,
@@ -744,11 +1050,12 @@ def build_clusters(items: list[AtlasItem]) -> tuple[list[AtlasCluster], dict[str
                     top_tags=top_tags,
                     top_tools=top_tools,
                     centroid=_mean_centroid(group),
+                    color_hint=hint,
                 )
             )
-            color_hints[cid] = _CATEGORY_SLOT_HINTS.get(ck)
+            color_hints[cid] = hint
         else:
-            k = max(SUBCLUSTER_MIN_K, min(SUBCLUSTER_MAX_K, round(len(group) / SUBCLUSTER_TARGET_SIZE)))
+            k = _target_subcluster_k(len(group))
             vecs = _build_subcluster_matrix(group)
             raw_labels = _spherical_kmeans(vecs, k, seed=42)
             merged_labels = _merge_tiny_subclusters(group, vecs, raw_labels)
@@ -763,6 +1070,8 @@ def build_clusters(items: list[AtlasItem]) -> tuple[list[AtlasCluster], dict[str
                 scores = [it.score for it in sub_members if it.score is not None]
                 top_tags, top_tools = _top_facets_for_members(sub_members, category_name=cat_label)
                 cid = f"cluster:{ck}:{idx}"
+                # Give category hint at most to the largest subcluster when no explicit hint is set
+                eff_hint = slot_hint if slot_hint is not None else (_CATEGORY_SLOT_HINTS.get(ck) if idx == 1 else None)
                 clusters.append(
                     AtlasCluster(
                         id=cid,
@@ -775,32 +1084,64 @@ def build_clusters(items: list[AtlasItem]) -> tuple[list[AtlasCluster], dict[str
                         top_tags=top_tags,
                         top_tools=top_tools,
                         centroid=_mean_centroid(sub_members),
+                        color_hint=eff_hint,
                     )
                 )
-                color_hints[cid] = slot_hint
+                color_hints[cid] = eff_hint
 
-    # Uncategorized cluster ("Неразобранное")
+    # Uncategorized cluster(s) ("Неразобранное") — auto-subcluster when > SUBCLUSTER_SPLIT_THRESHOLD
     uncat = by_cat.get("", [])
     if uncat:
-        scores = [it.score for it in uncat if it.score is not None]
-        top_tags, top_tools = _top_facets_for_members(uncat, category_name=None)
-        clusters.append(
-            AtlasCluster(
-                id="cluster:uncategorized",
-                label="Неразобранное",
-                category=None,
-                color=MUTED_COLOR_HEX,
-                color_slot=MUTED_COLOR_SLOT,
-                member_ids=[it.id for it in uncat],
-                avg_score=round(sum(scores) / len(scores), 2) if scores else None,
-                top_tags=top_tags,
-                top_tools=top_tools,
-                centroid=_mean_centroid(uncat),
+        if len(uncat) <= SUBCLUSTER_SPLIT_THRESHOLD:
+            scores = [it.score for it in uncat if it.score is not None]
+            top_tags, top_tools = _top_facets_for_members(uncat, category_name=None)
+            clusters.append(
+                AtlasCluster(
+                    id="cluster:uncategorized",
+                    label="Неразобранное",
+                    category=None,
+                    color=MUTED_COLOR_HEX,
+                    color_slot=MUTED_COLOR_SLOT,
+                    member_ids=[it.id for it in uncat],
+                    avg_score=round(sum(scores) / len(scores), 2) if scores else None,
+                    top_tags=top_tags,
+                    top_tools=top_tools,
+                    centroid=_mean_centroid(uncat),
+                )
             )
-        )
+        else:
+            k = _target_subcluster_k(len(uncat))
+            vecs = _build_subcluster_matrix(uncat)
+            raw_labels = _spherical_kmeans(vecs, k, seed=42)
+            merged_labels = _merge_tiny_subclusters(uncat, vecs, raw_labels)
+
+            sub_buckets_u: dict[int, list[AtlasItem]] = defaultdict(list)
+            for it, lbl in zip(uncat, merged_labels):
+                sub_buckets_u[lbl].append(it)
+            ordered_subs_u = sorted(sub_buckets_u.values(), key=lambda g: (-len(g), g[0].id))
+            named_subs_u = _pick_subcluster_labels("Неразобранное", ordered_subs_u)
+
+            for idx, (sub_members, (sub_label, _slot_hint)) in enumerate(zip(ordered_subs_u, named_subs_u), start=1):
+                scores = [it.score for it in sub_members if it.score is not None]
+                top_tags, top_tools = _top_facets_for_members(sub_members, category_name=None)
+                cid = f"cluster:uncategorized:{idx}"
+                clusters.append(
+                    AtlasCluster(
+                        id=cid,
+                        label=sub_label,
+                        category=None,
+                        color=_MUTED_SUBCLUSTER_HEXES[(idx - 1) % len(_MUTED_SUBCLUSTER_HEXES)],
+                        color_slot=MUTED_COLOR_SLOT,
+                        member_ids=[it.id for it in sub_members],
+                        avg_score=round(sum(scores) / len(scores), 2) if scores else None,
+                        top_tags=top_tags,
+                        top_tools=top_tools,
+                        centroid=_mean_centroid(sub_members),
+                    )
+                )
 
     # Sort clusters largest first (uncategorized at end)
-    clusters.sort(key=lambda c: (1 if c.id == "cluster:uncategorized" else 0, -len(c.member_ids), c.label))
+    clusters.sort(key=lambda c: (1 if _is_uncategorized_cluster(c.id) else 0, -len(c.member_ids), c.label))
     _assign_cluster_colors(clusters, color_hints)
 
     node_to_cluster: dict[str, str] = {}
@@ -816,11 +1157,17 @@ def compute_cluster_edges(
     node_to_cluster: dict[str, str],
     edges: list[dict[str, Any]],
     *,
-    max_bridges: int = 12,
+    max_bridges: int | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregate strongest inter-cluster bridges from cross-cluster edges + centroid affinity."""
     if len(clusters) < 2:
         return []
+
+    bridge_limit = (
+        max_bridges
+        if max_bridges is not None
+        else max(12, min(48, int(round(len(clusters) * 1.15))))
+    )
 
     by_id = {c.id: c for c in clusters}
     pair_edge_count: Counter[tuple[str, str]] = Counter()
@@ -859,12 +1206,10 @@ def compute_cluster_edges(
 
     candidates.sort(key=lambda x: (-x[0], x[1], x[2]))
     out: list[dict[str, Any]] = []
+    seen_pairs: set[tuple[str, str]] = set()
     cluster_deg: Counter[str] = Counter()
-    for strength, ca, cb, shared_n, sim, top_t in candidates:
-        if len(out) >= max_bridges:
-            break
-        if cluster_deg[ca] >= 4 or cluster_deg[cb] >= 4:
-            continue
+
+    def _add_bridge(ca: str, cb: str, shared_n: int, sim: float, top_t: list[str]) -> None:
         out.append(
             {
                 "source": ca,
@@ -875,8 +1220,30 @@ def compute_cluster_edges(
                 "top_tools": top_t,
             }
         )
+        seen_pairs.add((ca, cb))
         cluster_deg[ca] += 1
         cluster_deg[cb] += 1
+
+    # Pass 1: give disconnected clusters at least one bridge so 30+ cluster maps stay coherent
+    for _strength, ca, cb, shared_n, sim, top_t in candidates:
+        if len(out) >= bridge_limit:
+            break
+        if cluster_deg[ca] > 0 and cluster_deg[cb] > 0:
+            continue
+        if cluster_deg[ca] >= 4 or cluster_deg[cb] >= 4:
+            continue
+        _add_bridge(ca, cb, shared_n, sim, top_t)
+
+    # Pass 2: fill remaining bridge budget by strength
+    for _strength, ca, cb, shared_n, sim, top_t in candidates:
+        if len(out) >= bridge_limit:
+            break
+        if (ca, cb) in seen_pairs:
+            continue
+        if cluster_deg[ca] >= 4 or cluster_deg[cb] >= 4:
+            continue
+        _add_bridge(ca, cb, shared_n, sim, top_t)
+
     return out
 
 
@@ -940,7 +1307,7 @@ def _build_cluster_hull(
 
 
 def _local_2d_angles(items: list[AtlasItem]) -> list[float]:
-    """Deterministic semantic angle per item inside a cluster via 2-step power iteration."""
+    """Deterministic semantic angle per item inside a cluster via fast m×m Gram eigen-projection."""
     n = len(items)
     if n <= 1:
         return [0.0] * n
@@ -952,17 +1319,95 @@ def _local_2d_angles(items: list[AtlasItem]) -> list[float]:
     if np is not None:
         X = np.asarray(vecs, dtype=np.float32)
         X = X - X.mean(axis=0, keepdims=True)
-        # Deterministic 2D projection via SVD on centered local matrix
         try:
-            u, s, _vt = np.linalg.svd(X, full_matrices=False)
-            if u.shape[1] >= 2 and float(s[0]) > 1e-6:
-                px = u[:, 0] * s[0]
-                py = u[:, 1] * s[1]
-                return [math.atan2(float(py[i]), float(px[i])) for i in range(n)]
+            # m×m Gram matrix eigh is O(m^3) vs O(m^2*dim) full SVD (much faster when m << dim)
+            G = X @ X.T
+            eigvals, eigvecs = np.linalg.eigh(G)
+            if eigvals.size >= 2 and float(eigvals[-1]) > 1e-6:
+                s0 = math.sqrt(max(0.0, float(eigvals[-1])))
+                s1 = math.sqrt(max(0.0, float(eigvals[-2])))
+                px = (eigvecs[:, -1] * s0).tolist()
+                py = (eigvecs[:, -2] * s1).tolist()
+                return [math.atan2(py[i], px[i]) for i in range(n)]
         except Exception:
             pass
 
     return [i * 2.399963229728653 for i in range(n)]
+
+
+def _relax_cluster_points_grid(
+    cx: float,
+    cy: float,
+    max_r: float,
+    pts_x: list[float],
+    pts_y: list[float],
+    *,
+    min_dist: float = 20.0,
+    iterations: int = 24,
+) -> None:
+    """O(M) spatial-hash-grid collision relaxation inside a cluster disc."""
+    m_n = len(pts_x)
+    if m_n <= 1:
+        return
+
+    inv_cell = 1.0 / min_dist
+    min_dist_sq = min_dist * min_dist
+
+    for _ in range(iterations):
+        grid: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for i in range(m_n):
+            gx = math.floor(pts_x[i] * inv_cell)
+            gy = math.floor(pts_y[i] * inv_cell)
+            grid[(gx, gy)].append(i)
+
+        moved = False
+        for (gx, gy), cell_pts in grid.items():
+            # Check same cell + 4 forward neighbor cells to process each pair once
+            neighbor_cells = (
+                cell_pts,
+                grid.get((gx + 1, gy)),
+                grid.get((gx - 1, gy + 1)),
+                grid.get((gx, gy + 1)),
+                grid.get((gx + 1, gy + 1)),
+            )
+            for c_idx, other_pts in enumerate(neighbor_cells):
+                if not other_pts:
+                    continue
+                same_cell = c_idx == 0
+                for a_pos, i in enumerate(cell_pts):
+                    start_b = a_pos + 1 if same_cell else 0
+                    for b_pos in range(start_b, len(other_pts)):
+                        j = other_pts[b_pos]
+                        dx = pts_x[j] - pts_x[i]
+                        dy = pts_y[j] - pts_y[i]
+                        dist_sq = dx * dx + dy * dy
+                        if dist_sq < min_dist_sq:
+                            if dist_sq < 1e-12:
+                                ang = i * 2.1 + j * 1.3
+                                ux, uy = math.cos(ang), math.sin(ang)
+                                dist = 0.0
+                            else:
+                                dist = math.sqrt(dist_sq)
+                                ux, uy = dx / dist, dy / dist
+                            push = (min_dist - dist) * 0.52
+                            pts_x[i] -= ux * push
+                            pts_y[i] -= uy * push
+                            pts_x[j] += ux * push
+                            pts_y[j] += uy * push
+                            moved = True
+
+        # Soft containment inside cluster disc
+        for i in range(m_n):
+            dx = pts_x[i] - cx
+            dy = pts_y[i] - cy
+            d_sq = dx * dx + dy * dy
+            if d_sq > max_r * max_r:
+                scale = max_r / math.sqrt(d_sq)
+                pts_x[i] = cx + dx * scale
+                pts_y[i] = cy + dy * scale
+
+        if not moved:
+            break
 
 
 def layout_atlas(
@@ -971,23 +1416,31 @@ def layout_atlas(
     cluster_edges: list[dict[str, Any]],
     client_links: dict[str, list[str]],
 ) -> tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]:
-    """Compute deterministic 16:9 cluster coordinates, node coordinates, client coords, and hulls."""
+    """Compute deterministic 16:9 cluster coordinates, node coordinates, client coords, hulls, and spatial colors."""
+    golden = 2.399963229728653
     if not clusters:
-        return {}, {}
+        client_coords_only: dict[str, tuple[float, float]] = {}
+        for idx, cid in enumerate(sorted(client_links.keys())):
+            ang = idx * golden
+            r = 45.0 + 18.0 * math.sqrt(idx)
+            client_coords_only[cid] = (round(r * math.cos(ang), 1), round(r * math.sin(ang), 1))
+        return {}, client_coords_only
 
     # 1. Cluster radii & initial 16:9 grid/spiral placement
     for c in clusters:
         c.radius = _cluster_radius(len(c.member_ids))
 
     n_c = len(clusters)
-    golden = 2.399963229728653
     xs = [0.0] * n_c
     ys = [0.0] * n_c
+    uncat_rank = 0
     for i, c in enumerate(clusters):
         if i == 0:
             xs[i], ys[i] = -60.0, 0.0
-        elif c.id == "cluster:uncategorized":
-            xs[i], ys[i] = 460.0, 210.0
+        elif _is_uncategorized_cluster(c.id):
+            xs[i] = 460.0 + (uncat_rank % 3) * 140.0
+            ys[i] = 210.0 + (uncat_rank // 3) * 130.0
+            uncat_rank += 1
         else:
             ring = 145.0 * math.sqrt(i)
             ang = i * golden
@@ -1006,16 +1459,19 @@ def layout_atlas(
 
     # 2. Deterministic weighted relaxation: hard non-overlap + gentle bridge pull + 16:9 gravity
     cluster_gap = 66.0
-    for step in range(200):
+    radii = [c.radius for c in clusters]
+    is_uncat_flags = [_is_uncategorized_cluster(c.id) for c in clusters]
+    max_steps = 110
+    for step in range(max_steps):
         # Gentle bridge attraction (stronger early, cools down)
-        cool = max(0.15, 1.0 - step / 200.0)
+        cool = max(0.15, 1.0 - step / float(max_steps))
         for ia, ib, w in attractions:
             dx = xs[ib] - xs[ia]
             dy = ys[ib] - ys[ia]
             dist = math.hypot(dx, dy) or 1.0
-            ideal = clusters[ia].radius + clusters[ib].radius + cluster_gap + 28.0
+            ideal = radii[ia] + radii[ib] + cluster_gap + 28.0
             if dist > ideal:
-                pull = (dist - ideal) * 0.015 * w * cool
+                pull = (dist - ideal) * 0.022 * w * cool
                 ux, uy = dx / dist, dy / dist
                 xs[ia] += ux * pull
                 ys[ia] += uy * pull
@@ -1023,33 +1479,46 @@ def layout_atlas(
                 ys[ib] -= uy * pull
 
         # Anisotropic 16:9 gravity (stronger Y pull keeps map wide rather than tall)
-        for i, c in enumerate(clusters):
-            if c.id == "cluster:uncategorized":
-                # Gently keep uncategorized calm on the outer lower-right flank
-                xs[i] += (420.0 - xs[i]) * 0.008 * cool
-                ys[i] += (160.0 - ys[i]) * 0.014 * cool
+        for i in range(n_c):
+            if is_uncat_flags[i]:
+                xs[i] += (420.0 - xs[i]) * 0.012 * cool
+                ys[i] += (160.0 - ys[i]) * 0.020 * cool
             else:
-                xs[i] *= 1.0 - 0.006 * cool
-                ys[i] *= 1.0 - 0.036 * cool
+                xs[i] *= 1.0 - 0.009 * cool
+                ys[i] *= 1.0 - 0.048 * cool
 
         # Hard non-overlap separation between all cluster territories
+        max_overlap = 0.0
         for i in range(n_c):
+            xi = xs[i]
+            yi = ys[i]
+            ri = radii[i] + cluster_gap
             for j in range(i + 1, n_c):
-                dx = xs[j] - xs[i]
-                dy = ys[j] - ys[i]
-                dist = math.hypot(dx, dy)
-                min_d = clusters[i].radius + clusters[j].radius + cluster_gap
-                if dist < min_d:
-                    if dist < 1e-6:
+                dx = xs[j] - xi
+                dy = ys[j] - yi
+                min_d = ri + radii[j]
+                dist_sq = dx * dx + dy * dy
+                if dist_sq < min_d * min_d:
+                    if dist_sq < 1e-12:
                         ang = (i * 1.7 + j * 2.9)
                         ux, uy = math.cos(ang), math.sin(ang)
+                        dist = 0.0
                     else:
+                        dist = math.sqrt(dist_sq)
                         ux, uy = dx / dist, dy / dist
-                    overlap = (min_d - dist) * 0.54
-                    xs[i] -= ux * overlap
-                    ys[i] -= uy * overlap
+                    gap = min_d - dist
+                    if gap > max_overlap:
+                        max_overlap = gap
+                    overlap = gap * 0.54
+                    xi -= ux * overlap
+                    yi -= uy * overlap
                     xs[j] += ux * overlap
                     ys[j] += uy * overlap
+            xs[i] = xi
+            ys[i] = yi
+
+        if step >= 55 and max_overlap < 0.25:
+            break
 
     # Center the entire archipelago around (0, 0)
     min_x = min(xs[i] - clusters[i].radius for i in range(n_c))
@@ -1062,7 +1531,10 @@ def layout_atlas(
         c.x = round(xs[i] - cx_shift, 1)
         c.y = round(ys[i] - cy_shift, 1)
 
-    # 3. Deterministic intra-cluster placement (high score closer to core, semantic angle, zero overlap)
+    # Spatial graph-coloring after layout so neighboring clusters never share a color
+    _assign_spatial_cluster_colors(clusters, cluster_edges)
+
+    # 3. Deterministic intra-cluster placement (high score closer to core, semantic angle, O(M) grid relaxation)
     node_coords: dict[str, tuple[float, float]] = {}
     for c in clusters:
         members = [items_by_id[mid] for mid in c.member_ids if mid in items_by_id]
@@ -1089,34 +1561,7 @@ def layout_atlas(
             pts_x.append(c.x + r * math.cos(ang))
             pts_y.append(c.y + r * math.sin(ang))
 
-        # Local collision relaxation so points never clump or overlap
-        min_node_dist = 20.0
-        for _ in range(40):
-            for i in range(m_n):
-                for j in range(i + 1, m_n):
-                    dx = pts_x[j] - pts_x[i]
-                    dy = pts_y[j] - pts_y[i]
-                    dist = math.hypot(dx, dy)
-                    if dist < min_node_dist:
-                        if dist < 1e-6:
-                            ang = (i * 2.1 + j * 1.3)
-                            ux, uy = math.cos(ang), math.sin(ang)
-                        else:
-                            ux, uy = dx / dist, dy / dist
-                        push = (min_node_dist - dist) * 0.52
-                        pts_x[i] -= ux * push
-                        pts_y[i] -= uy * push
-                        pts_x[j] += ux * push
-                        pts_y[j] += uy * push
-            # Soft containment inside cluster disc
-            for i in range(m_n):
-                dx = pts_x[i] - c.x
-                dy = pts_y[i] - c.y
-                d = math.hypot(dx, dy)
-                if d > max_r:
-                    scale = max_r / d
-                    pts_x[i] = c.x + dx * scale
-                    pts_y[i] = c.y + dy * scale
+        _relax_cluster_points_grid(c.x, c.y, max_r, pts_x, pts_y, min_dist=20.0, iterations=24)
 
         member_xy: list[tuple[float, float]] = []
         for it, px, py in zip(members, pts_x, pts_y):
@@ -1126,36 +1571,88 @@ def layout_atlas(
 
         c.hull = _build_cluster_hull(c.x, c.y, c.radius, member_xy)
 
-    # 4. Place client nodes cleanly near centroid of their linked materials
+    # 4. Place client nodes cleanly OUTSIDE all cluster hulls/territories near their linked materials
     client_coords: dict[str, tuple[float, float]] = {}
-    all_placed = list(node_coords.values())
-    for cid in sorted(client_links.keys()):
+    placed_clients: list[tuple[float, float]] = []
+    # Precompute outer radius per cluster (hull extent + visual breathing margin)
+    cluster_bounds: list[tuple[float, float, float]] = []
+    for c in clusters:
+        hull_r = max(
+            (math.hypot(hx - c.x, hy - c.y) for hx, hy in c.hull),
+            default=c.radius,
+        )
+        cluster_bounds.append((c.x, c.y, max(c.radius, hull_r) + 26.0))
+
+    outer_ring_r = max(
+        (math.hypot(cx, cy) + cr for cx, cy, cr in cluster_bounds),
+        default=120.0,
+    ) + 28.0
+
+    for c_idx, cid in enumerate(sorted(client_links.keys())):
         mids = [m for m in client_links[cid] if m in node_coords]
         if mids:
             cx = sum(node_coords[m][0] for m in mids) / len(mids)
             cy = sum(node_coords[m][1] for m in mids) / len(mids)
-            norm = math.hypot(cx, cy) or 1.0
-            px = cx + (cx / norm) * 32.0
-            py = cy + (cy / norm) * 32.0
+            norm = math.hypot(cx, cy)
+            if norm > 1e-6:
+                px = cx + (cx / norm) * 28.0
+                py = cy + (cy / norm) * 28.0
+            else:
+                ang = c_idx * golden
+                px = cx + 28.0 * math.cos(ang)
+                py = cy + 28.0 * math.sin(ang)
         else:
-            px, py = 0.0, 0.0
+            ang = c_idx * golden
+            px = outer_ring_r * math.cos(ang)
+            py = outer_ring_r * math.sin(ang)
 
-        # Nudge away from any existing point
-        for _ in range(15):
-            for ox, oy in all_placed:
+        # Iteratively push outside every cluster territory and away from sibling clients
+        for step in range(48):
+            pushed = False
+            for bx, by, br in cluster_bounds:
+                dx = px - bx
+                dy = py - by
+                d = math.hypot(dx, dy)
+                if d < br:
+                    if d < 1e-6:
+                        ang = c_idx * golden + step * 0.7
+                        ux, uy = math.cos(ang), math.sin(ang)
+                    else:
+                        ux, uy = dx / d, dy / d
+                    px = bx + ux * (br + 4.0)
+                    py = by + uy * (br + 4.0)
+                    pushed = True
+
+            for ox, oy in placed_clients:
                 dx = px - ox
                 dy = py - oy
                 d = math.hypot(dx, dy)
-                if d < 24.0:
+                if d < 36.0:
                     if d < 1e-6:
-                        ux, uy = 1.0, 0.0
+                        ang = c_idx * 1.9 + 0.4
+                        ux, uy = math.cos(ang), math.sin(ang)
                     else:
                         ux, uy = dx / d, dy / d
-                    px += ux * (24.0 - d)
-                    py += uy * (24.0 - d)
+                    px += ux * (36.0 - d + 2.0)
+                    py += uy * (36.0 - d + 2.0)
+                    pushed = True
+
+            if not pushed:
+                break
+
+        # Final safety check: if trapped between tightly packed hulls, step onto outer perimeter in same direction
+        if any(math.hypot(px - bx, py - by) < br - 2.0 for bx, by, br in cluster_bounds):
+            ang = math.atan2(py, px) if (abs(px) > 1e-6 or abs(py) > 1e-6) else c_idx * golden
+            px = outer_ring_r * math.cos(ang)
+            py = outer_ring_r * math.sin(ang)
+            for ox, oy in placed_clients:
+                if math.hypot(px - ox, py - oy) < 36.0:
+                    ang += 0.25
+                    px = outer_ring_r * math.cos(ang)
+                    py = outer_ring_r * math.sin(ang)
 
         rx, ry = round(px, 1), round(py, 1)
         client_coords[cid] = (rx, ry)
-        all_placed.append((rx, ry))
+        placed_clients.append((rx, ry))
 
     return node_coords, client_coords

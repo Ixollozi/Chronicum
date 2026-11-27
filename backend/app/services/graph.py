@@ -328,14 +328,97 @@ def _compute_shared_tool_candidates(
 
     # Skip ubiquitous tools (e.g. df > 25% of archive when N >= 15) that glue everything together
     max_df = max(20, int(round(n_mats * 0.25))) if n_mats >= 15 else n_mats
-    shared_pairs: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
-
-    for ek, mids in entity_index.items():
+    valid_tools: list[tuple[str, float, list[str]]] = []
+    for ek, mids in sorted(entity_index.items()):
         df = len(mids)
         if df < 2 or df > max_df:
             continue
         idf = math.log((n_mats + 1.0) / (df + 1.0)) + 0.5
-        ordered = sorted(mids)
+        valid_tools.append((ek, idf, sorted(mids)))
+
+    if not valid_tools:
+        return []
+
+    # Fast vectorized path via BLAS matmul when NumPy is available (avoids O(df^2) Python pair explosion)
+    if np is not None and n_mats >= 32:
+        mids_list = sorted(entities_by_mid.keys())
+        mid_to_idx = {m: i for i, m in enumerate(mids_list)}
+        n_tools = len(valid_tools)
+        M = np.zeros((n_mats, n_tools), dtype=np.float32)
+        tool_idf = {ek: idf for ek, idf, _ in valid_tools}
+        for col, (_ek, idf, tmids) in enumerate(valid_tools):
+            w = math.sqrt(idf)
+            for m in tmids:
+                M[mid_to_idx[m], col] = w
+
+        S = M @ M.T
+        np.fill_diagonal(S, 0.0)
+        k_top = _MAX_TOOL_CANDIDATES_PER_MAT
+        top_sets: dict[str, set[str]] = {}
+        top_lists: dict[str, list[tuple[float, str]]] = {}
+
+        for i in range(n_mats):
+            row = S[i]
+            nz = np.flatnonzero(row > 1e-6)
+            if nz.size == 0:
+                continue
+            vals = row[nz]
+            # Grab small candidate pool (top k_top + tie margin) without sorting all N items
+            take = min(nz.size, k_top * 3 + 4)
+            if nz.size > take:
+                part = np.argpartition(vals, -take)[-take:]
+                cand_idx = nz[part]
+            else:
+                cand_idx = nz
+            a = mids_list[i]
+            ents_a = entities_by_mid[a]
+            scored: list[tuple[float, int, str]] = []
+            for j_raw in cand_idx:
+                j = int(j_raw)
+                b = mids_list[j]
+                shared_ks = [ek for ek in ents_a if ek in entities_by_mid[b] and ek in tool_idf]
+                if not shared_ks:
+                    continue
+                scored.append((sum(tool_idf[ek] for ek in shared_ks), len(shared_ks), b))
+            scored.sort(key=lambda x: (-x[0], -x[1], x[2]))
+            best = scored[:k_top]
+            if best:
+                top_sets[a] = {b for _, _, b in best}
+                top_lists[a] = [(sc, b) for sc, _, b in best]
+
+        seen: set[tuple[str, str]] = set()
+        out: list[dict[str, Any]] = []
+        for a, best_list in top_lists.items():
+            ents_a = entities_by_mid[a]
+            for idf_sum, b in best_list:
+                pair = (a, b) if a < b else (b, a)
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                ents_b = entities_by_mid[b]
+                shared_items = [
+                    (ents_a.get(ek, ek), tool_idf[ek])
+                    for ek in ents_a
+                    if ek in ents_b and ek in tool_idf
+                ]
+                shared_items.sort(key=lambda x: (-x[1], x[0]))
+                labels = [lbl for lbl, _ in shared_items]
+                is_mutual = b in top_sets.get(a, set()) and a in top_sets.get(b, set())
+                out.append(
+                    {
+                        "source": pair[0],
+                        "target": pair[1],
+                        "reason": "shared_tool",
+                        "weight": len(labels),
+                        "label": ", ".join(labels[:3]),
+                        "_score": idf_sum,
+                        "_mutual": is_mutual,
+                    }
+                )
+        return out
+
+    shared_pairs: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
+    for ek, idf, ordered in valid_tools:
         for i in range(len(ordered)):
             a = ordered[i]
             lbl = entities_by_mid[a].get(ek, ek)
@@ -351,21 +434,21 @@ def _compute_shared_tool_candidates(
         neighbors[a].append((idf_sum, len(labels), b, labels))
         neighbors[b].append((idf_sum, len(labels), a, labels))
 
-    top_sets: dict[str, set[str]] = {}
+    top_sets_py: dict[str, set[str]] = {}
     for mid, cands in neighbors.items():
         cands.sort(key=lambda x: (-x[0], -x[1], x[2]))
-        top_sets[mid] = {other for _, _, other, _ in cands[:_MAX_TOOL_CANDIDATES_PER_MAT]}
+        top_sets_py[mid] = {other for _, _, other, _ in cands[:_MAX_TOOL_CANDIDATES_PER_MAT]}
 
-    seen: set[tuple[str, str]] = set()
-    out: list[dict[str, Any]] = []
+    seen_py: set[tuple[str, str]] = set()
+    out_py: list[dict[str, Any]] = []
     for mid, cands in neighbors.items():
         for idf_sum, cnt, other, labels in cands[:_MAX_TOOL_CANDIDATES_PER_MAT]:
             pair = (mid, other) if mid < other else (other, mid)
-            if pair in seen:
+            if pair in seen_py:
                 continue
-            seen.add(pair)
-            is_mutual = other in top_sets.get(mid, set()) and mid in top_sets.get(other, set())
-            out.append(
+            seen_py.add(pair)
+            is_mutual = other in top_sets_py.get(mid, set()) and mid in top_sets_py.get(other, set())
+            out_py.append(
                 {
                     "source": pair[0],
                     "target": pair[1],
@@ -376,7 +459,7 @@ def _compute_shared_tool_candidates(
                     "_mutual": is_mutual,
                 }
             )
-    return out
+    return out_py
 
 
 def _compute_link_candidates(link_materials: dict[str, set[str]]) -> list[dict[str, Any]]:
@@ -475,19 +558,23 @@ def _compute_semantic_candidates(
         M = M / norms
         S = M @ M.T
         np.fill_diagonal(S, -1.0)
-        # Extract top candidates above threshold per row
+        # Extract top-K candidates above threshold per row without materializing O(N^2) Python tuples
+        k_top = _MAX_SEMANTIC_CANDIDATES_PER_MAT
         for i in range(n):
             row = S[i]
             hits = np.flatnonzero(row >= thr)
             if hits.size == 0:
                 continue
+            if hits.size > k_top:
+                vals = row[hits]
+                # Keep small tie-margin above k_top for deterministic tie-breaking by mids[j]
+                take = min(hits.size, k_top * 2 + 2)
+                part = np.argpartition(vals, -take)[-take:]
+                hits = hits[part]
             a = mids[i]
-            for j in hits:
-                if j > i:
-                    sim = float(row[j])
-                    b = mids[int(j)]
-                    sem_neighbors[a].append((sim, b))
-                    sem_neighbors[b].append((sim, a))
+            hit_vals = row[hits].tolist()
+            hit_idxs = hits.tolist()
+            sem_neighbors[a] = [(val, mids[j]) for val, j in zip(hit_vals, hit_idxs)]
     else:
         for i in range(n):
             a = mids[i]

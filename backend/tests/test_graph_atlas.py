@@ -362,3 +362,210 @@ async def test_api_graph_endpoint_filters_and_light_mode(tmp_path: Path, monkeyp
         app.dependency_overrides.pop(get_session, None)
         get_settings.cache_clear()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stress_fixes_colors_subclusters_uncategorized_clients_and_bridges(tmp_path: Path):
+    """Regression coverage for stress-test fixes 1-5 & 7:
+    - zero adjacent same-color clusters on 30+ clusters
+    - no tautological subcluster labels (Дизайн · Дизайн) and no umbrella archetypes on non-AI categories
+    - 60-item category splits into >= 3 clusters; 220-item category splits into > 5 clusters
+    - large uncategorized bucket (>25) auto-subclusters
+    - client nodes never land inside any cluster territory
+    - compute_cluster_edges scales max_bridges above 12 on 30+ clusters
+    """
+    engine, Session = await _make_session_factory(tmp_path, "atlas_stress_fixes.db")
+    try:
+        async with Session() as s:
+            # 1) 30+ categories with cross-category shared tools to exercise spatial coloring & dynamic bridges
+            cats = [Category(name=f"Категория {i}") for i in range(28)]
+            cat_design = Category(name="Дизайн")
+            cat_biz = Category(name="Бизнес")
+            all_cats = [cat_design, cat_biz, *cats]
+            s.add_all(all_cats)
+            await s.flush()
+
+            # 60 design items across 4 distinct visual subtopics -> must split into >=3 clusters, no "Дизайн · Дизайн"
+            design_topics = [
+                ("Figma UI Kit компоненты токены", ["Figma", "Tokens Studio"]),
+                ("Типографика сетка журнальный постер", ["InDesign", "Glyphs"]),
+                ("3D WebGL рендер Blender шейдеры", ["Blender", "Three.js"]),
+                ("Брендинг айдентика логотип гайдлайн", ["Illustrator", "Brandbook"]),
+            ]
+            for i in range(60):
+                txt, tools = design_topics[i % 4]
+                m = Material(
+                    source_type="web",
+                    title=f"{txt} кейс {i}",
+                    summary=f"Подробный разбор {txt} #{i}",
+                    category_id=cat_design.id,
+                    tools=tools,
+                    usefulness_score=7,
+                    processing_status=ProcessingStatus.DONE.value,
+                    embedding={"model": LOCAL_EMBED_MODEL, "vec": local_embed_text(f"{txt} {i}")},
+                )
+                s.add(m)
+
+            # 42 business items with SEO/CRM words -> must NOT get AI umbrella archetype "Контент, SEO и лидген"
+            biz_topics = [
+                ("Unit economics маржинальность финансы", ["Excel", "Notion"]),
+                ("Найм команды KPI мотивация", ["HRFlow", "Linear"]),
+                ("Партнёрства контракты B2B переговоры", ["HubSpot", "Pipedrive"]),
+            ]
+            for i in range(42):
+                txt, tools = biz_topics[i % 3]
+                m = Material(
+                    source_type="youtube",
+                    title=f"{txt} урок {i}",
+                    summary=f"Стратегия {txt} #{i}",
+                    category_id=cat_biz.id,
+                    tools=tools,
+                    usefulness_score=8,
+                    processing_status=ProcessingStatus.DONE.value,
+                    embedding={"model": LOCAL_EMBED_MODEL, "vec": local_embed_text(f"{txt} {i}")},
+                )
+                s.add(m)
+
+            # 45 uncategorized items -> must auto-subcluster (>1 uncategorized cluster)
+            uncat_topics = [
+                ("Docker nginx сервер деплой linux", ["Docker", "Nginx"]),
+                ("Психология привычки фокус чтение", ["Obsidian", "Anki"]),
+                ("Видео монтаж звук свет цветокор", ["DaVinci", "CapCut"]),
+            ]
+            for i in range(45):
+                txt, tools = uncat_topics[i % 3]
+                m = Material(
+                    source_type="text",
+                    title=f"{txt} заметка {i}",
+                    summary=f"Сырая заметка {txt} #{i}",
+                    category_id=None,
+                    tools=tools,
+                    usefulness_score=6,
+                    processing_status=ProcessingStatus.DONE.value,
+                    embedding={"model": LOCAL_EMBED_MODEL, "vec": local_embed_text(f"{txt} {i}")},
+                )
+                s.add(m)
+
+            # 28 smaller categories connected via overlapping bridge tools
+            cat_first_mats: list[Material] = []
+            for idx, c in enumerate(cats):
+                shared_t = f"BridgeTool_{idx % 14}"
+                next_t = f"BridgeTool_{(idx + 1) % 14}"
+                for j in range(3):
+                    m = Material(
+                        source_type="web",
+                        title=f"{c.name} материал {j}",
+                        summary=f"Описание {c.name} с {shared_t}",
+                        category_id=c.id,
+                        tools=[shared_t, next_t],
+                        usefulness_score=7,
+                        processing_status=ProcessingStatus.DONE.value,
+                        embedding={"model": LOCAL_EMBED_MODEL, "vec": local_embed_text(f"{c.name} {shared_t} {j}")},
+                    )
+                    s.add(m)
+                    if j == 0:
+                        cat_first_mats.append(m)
+
+            await s.flush()
+
+            # 5 clients linked across multiple distant clusters -> must not land inside ANY cluster territory
+            for ci in range(5):
+                cl = Client(display_name=f"Client #{ci}", context_line="Agency client")
+                s.add(cl)
+                await s.flush()
+                for target_m in (cat_first_mats[ci], cat_first_mats[(ci + 7) % len(cat_first_mats)]):
+                    s.add(MaterialClientLink(material_id=target_m.id, client_id=cl.id, relation="reference"))
+
+            await s.commit()
+            data = await build_graph(s, include_semantic=True)
+
+        clusters = data["clusters"]
+        assert len(clusters) >= 34
+
+        # Check 1: Zero spatially adjacent same-color cluster pairs
+        adj_same = []
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                ci, cj = clusters[i], clusters[j]
+                if ci["color"] == cj["color"]:
+                    dist = math.hypot(ci["x"] - cj["x"], ci["y"] - cj["y"])
+                    if dist < ci["radius"] + cj["radius"] + 120.0:
+                        adj_same.append((ci["label"], cj["label"], ci["color"], round(dist, 1)))
+        assert adj_same == [], f"Found adjacent same-color clusters: {adj_same}"
+
+        # Check 2 & 3: Design splits into >=3 clusters with zero tautologies; Biz has no AI umbrella archetype
+        design_clusters = [c for c in clusters if c["category"] == "Дизайн"]
+        assert len(design_clusters) >= 3, f"Expected >=3 Design subclusters for 60 items, got {len(design_clusters)}"
+        for c in design_clusters:
+            sub = c["label"].split(" · ", 1)[-1].lower()
+            assert "дизайн" not in sub, f"Tautological label: {c['label']}"
+
+        biz_clusters = [c for c in clusters if c["category"] == "Бизнес"]
+        assert len(biz_clusters) >= 2
+        for c in biz_clusters:
+            assert "Контент и SEO" not in c["label"]
+            assert "Контент, SEO и лидген" not in c["label"]
+
+        # Check 4: Uncategorized auto-subclusters when > 25 items
+        uncat_clusters = [c for c in clusters if c["id"].startswith("cluster:uncategorized")]
+        assert len(uncat_clusters) >= 2, f"Expected uncategorized auto-split, got {uncat_clusters}"
+        assert sum(c["count"] for c in uncat_clusters) == 45
+
+        # Check 5: Client nodes strictly outside all cluster radii
+        client_nodes = [n for n in data["nodes"] if n["type"] == "client"]
+        assert len(client_nodes) == 5
+        for cn in client_nodes:
+            for c in clusters:
+                dist = math.hypot(cn["x"] - c["x"], cn["y"] - c["y"])
+                assert dist >= c["radius"] + 10.0, (
+                    f"Client {cn['title']} landed inside/too close to {c['label']}: dist={dist:.1f}, r={c['radius']:.1f}"
+                )
+
+        # Check 7: Dynamic cluster bridges > 12 on 34+ clusters
+        assert len(data["cluster_edges"]) > 12, f"Expected >12 cluster bridges, got {len(data['cluster_edges'])}"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_very_large_category_breaks_old_max_k_ceiling(tmp_path: Path):
+    """Fix 3: 220 materials in a single category should split into > 5 subclusters."""
+    engine, Session = await _make_session_factory(tmp_path, "atlas_big_cat.db")
+    try:
+        async with Session() as s:
+            cat_ai = Category(name="AI")
+            s.add(cat_ai)
+            await s.flush()
+
+            topics = [
+                ("Claude Code MCP agent automation", ["Claude Code", "MCP"]),
+                ("Cursor IDE rules workflow coding", ["Cursor", "GitHub"]),
+                ("Midjourney Flux visual prompt art", ["Midjourney", "Flux"]),
+                ("Kling Veo video generation reels", ["Kling", "Veo 3"]),
+                ("RAG vector database embeddings search", ["Qdrant", "LangChain"]),
+                ("Voice TTS audio podcast Whisper", ["ElevenLabs", "Whisper"]),
+                ("Fine-tuning LoRA PyTorch training GPU", ["PyTorch", "HuggingFace"]),
+                ("Browser automation Playwright scraping", ["Playwright", "Firecrawl"]),
+            ]
+            for i in range(220):
+                txt, tools = topics[i % len(topics)]
+                m = Material(
+                    source_type="web",
+                    title=f"{txt} guide {i}",
+                    summary=f"Deep dive {txt} #{i}",
+                    category_id=cat_ai.id,
+                    tools=tools,
+                    usefulness_score=8,
+                    processing_status=ProcessingStatus.DONE.value,
+                    embedding={"model": LOCAL_EMBED_MODEL, "vec": local_embed_text(f"{txt} {i}")},
+                )
+                s.add(m)
+            await s.commit()
+            data = await build_graph(s, include_semantic=True)
+
+        ai_clusters = [c for c in data["clusters"] if c["category"] == "AI"]
+        assert len(ai_clusters) > 5, f"Expected >5 subclusters for 220 items, got {len(ai_clusters)}"
+        assert sum(c["count"] for c in ai_clusters) == 220
+    finally:
+        await engine.dispose()
+
