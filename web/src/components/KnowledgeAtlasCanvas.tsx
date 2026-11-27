@@ -18,6 +18,13 @@ import type {
 export type AtlasLodLevel = 1 | 2 | 3;
 export type AtlasViewMode = "clusters" | "links" | "hygiene";
 
+export function isUncategorizedMaterial(node: GraphNode): boolean {
+  return (
+    node.type !== "client" &&
+    (!node.category || node.cluster_id === "cluster:uncategorized")
+  );
+}
+
 export type KnowledgeAtlasHandle = {
   fitOverview: (instant?: boolean) => void;
   focusCluster: (clusterId: string) => void;
@@ -117,6 +124,45 @@ function truncateText(text: string, maxLen: number): string {
   return `${trimmed.slice(0, Math.max(1, maxLen - 1)).trimEnd()}…`;
 }
 
+function compactCategoryPrefix(prefix: string, maxLen = 8): string {
+  const trimmed = prefix.trim();
+  if (trimmed.length <= maxLen) return trimmed;
+  const firstWord = trimmed.split(/\s+/)[0] ?? trimmed;
+  if (firstWord.length <= maxLen) return firstWord;
+  let stem = firstWord.slice(0, Math.max(4, maxLen - 1));
+  while (stem.length > 4 && /[аеёиоуыэюяaeiouy]$/i.test(stem)) {
+    stem = stem.slice(0, -1);
+  }
+  return `${stem}.`;
+}
+
+function formatMacroClusterLabel(label: string, category: string | null): string {
+  const trimmed = label.trim();
+  let prefix: string | null = null;
+  let rest: string | null = null;
+
+  if (category && trimmed.startsWith(`${category} · `)) {
+    prefix = category;
+    rest = trimmed.slice(category.length + 3).trim();
+  } else {
+    const sepIdx = trimmed.indexOf(" · ");
+    if (sepIdx > 0) {
+      prefix = trimmed.slice(0, sepIdx).trim();
+      rest = trimmed.slice(sepIdx + 3).trim();
+    }
+  }
+
+  if (!prefix || !rest) {
+    return truncateText(trimmed, 30);
+  }
+
+  if (trimmed.length <= 32) return trimmed;
+
+  const shortPrefix = compactCategoryPrefix(prefix, 8);
+  const suffixBudget = Math.max(24, 36 - shortPrefix.length - 3);
+  return `${shortPrefix} · ${truncateText(rest, suffixBudget)}`;
+}
+
 function roundedRectPath(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -177,7 +223,7 @@ function drawDiamond(
 }
 
 function baseNodeRadius(node: GraphNode): number {
-  if (node.type === "client") return 6.2;
+  if (node.type === "client") return 7.8;
   const s = node.score;
   if (s !== null && s >= 8) return 5.5;
   if (s !== null && s >= 5) return 3.8;
@@ -226,6 +272,7 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
       relZoom: 1,
     });
     const placedClusterPillsRef = useRef<PlacedClusterPill[]>([]);
+    const placedClientPillsRef = useRef<PlacedClusterPill[]>([]);
 
     // Pointer / gesture state
     const pointerRef = useRef<{
@@ -275,9 +322,21 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
       }
 
       const nodeById = new Map<string, GraphNode>();
+      const hygieneNodeIds = new Set<string>();
+      const hygieneClusterIds = new Set<string>();
+      const clientNodes: GraphNode[] = [];
       for (const n of nodes) {
         nodeById.set(n.id, n);
+        if (n.type === "client") {
+          clientNodes.push(n);
+        } else if (isUncategorizedMaterial(n)) {
+          hygieneNodeIds.add(n.id);
+          if (n.cluster_id) hygieneClusterIds.add(n.cluster_id);
+        }
       }
+      clientNodes.sort(
+        (a, b) => b.degree - a.degree || a.title.localeCompare(b.title, "ru")
+      );
 
       const adj = new Map<string, Set<string>>();
       const edgesByNode = new Map<string, GraphEdge[]>();
@@ -351,6 +410,9 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
         clusterColorById,
         subclustersByCategory,
         nodeById,
+        hygieneNodeIds,
+        hygieneClusterIds,
+        clientNodes,
         adj,
         edgesByNode,
         bounds: { minX, maxX, minY, maxY },
@@ -666,6 +728,8 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
       const egoNeighbors = egoId ? idx.adj.get(egoId) || new Set<string>() : null;
       const selectedClusterObj = selCluster ? idx.clusterById.get(selCluster) : null;
       const selectedCategory = selectedClusterObj?.category ?? null;
+      const hygieneActive =
+        curMode === "hygiene" && idx.hygieneNodeIds.size > 0;
 
       // World-space transform for hulls, edges, and nodes
       ctx.save();
@@ -689,7 +753,7 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
           dimmed = egoNodeObj?.cluster_id !== c.id;
         } else if (selCluster && !isSelected && !isSiblingSubcluster) {
           dimmed = true;
-        } else if (curMode === "hygiene" && !isUncat) {
+        } else if (hygieneActive && !idx.hygieneClusterIds.has(c.id)) {
           dimmed = true;
         }
 
@@ -890,10 +954,7 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
         const inSelectedCluster =
           !selCluster || n.cluster_id === selCluster;
         const isHygieneTarget =
-          curMode === "hygiene" &&
-          (!n.category ||
-            n.cluster_id === "cluster:uncategorized" ||
-            (n.tags?.length ?? 0) === 0);
+          hygieneActive && idx.hygieneNodeIds.has(n.id);
 
         let alpha = 0.92;
         if (!isMatched) {
@@ -902,7 +963,7 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
           if (isSel || isHov) alpha = 1.0;
           else if (isEgoNeighbor) alpha = 0.96;
           else alpha = curIsolate ? 0.04 : 0.12;
-        } else if (curMode === "hygiene") {
+        } else if (hygieneActive) {
           alpha = isHygieneTarget ? 0.98 : 0.14;
         } else if (selCluster && !inSelectedCluster) {
           alpha = 0.2;
@@ -915,25 +976,49 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
         const rWorld = baseR / Math.pow(cam.k, 0.72);
 
         if (n.type === "client") {
-          // Brass diamond marker for clients
+          // Prominent brass diamond marker for clients (clearly visible on Macro)
           ctx.save();
-          if (isSel || isHov) {
-            drawDiamond(ctx, nx, ny, rWorld * 1.85);
-            ctx.fillStyle = hexToRgba(ACCENT_BRASS, 0.22);
+          const rDiamond = rWorld * (lod === 1 ? 1.15 : 1.0);
+          if (alpha > 0.35) {
+            const glow = ctx.createRadialGradient(
+              nx,
+              ny,
+              rDiamond * 0.4,
+              nx,
+              ny,
+              rDiamond * 2.5
+            );
+            glow.addColorStop(
+              0,
+              hexToRgba(ACCENT_BRASS, (isSel || isHov ? 0.38 : 0.22) * alpha)
+            );
+            glow.addColorStop(1, hexToRgba(ACCENT_BRASS, 0));
+            ctx.beginPath();
+            ctx.arc(nx, ny, rDiamond * 2.5, 0, Math.PI * 2);
+            ctx.fillStyle = glow;
             ctx.fill();
-            ctx.strokeStyle = hexToRgba(ACCENT_BRASS, 0.9);
-            ctx.lineWidth = 1.4 / cam.k;
+
+            drawDiamond(ctx, nx, ny, rDiamond * (isSel || isHov ? 1.85 : 1.48));
+            if (isSel || isHov) {
+              ctx.fillStyle = hexToRgba(ACCENT_BRASS, 0.22);
+              ctx.fill();
+            }
+            ctx.strokeStyle = hexToRgba(
+              ACCENT_BRASS,
+              (isSel || isHov ? 0.95 : 0.58) * alpha
+            );
+            ctx.lineWidth = (isSel || isHov ? 1.5 : 1.15) / cam.k;
             ctx.stroke();
           }
-          drawDiamond(ctx, nx, ny, rWorld);
+          drawDiamond(ctx, nx, ny, rDiamond);
           ctx.fillStyle = hexToRgba(ACCENT_BRASS, alpha);
           ctx.fill();
-          ctx.strokeStyle = hexToRgba("#f4e6cc", alpha * 0.85);
-          ctx.lineWidth = 1.15 / cam.k;
+          ctx.strokeStyle = hexToRgba("#f7ebd5", alpha * 0.92);
+          ctx.lineWidth = 1.25 / cam.k;
           ctx.stroke();
 
           ctx.beginPath();
-          ctx.arc(nx, ny, rWorld * 0.26, 0, Math.PI * 2);
+          ctx.arc(nx, ny, rDiamond * 0.25, 0, Math.PI * 2);
           ctx.fillStyle = hexToRgba(BG_BASE, alpha);
           ctx.fill();
           ctx.restore();
@@ -961,8 +1046,7 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
 
         ctx.beginPath();
         ctx.arc(nx, ny, rWorld, 0, Math.PI * 2);
-        const dotColor =
-          curMode === "hygiene" && isHygieneTarget ? "#d08a62" : clusterColor;
+        const dotColor = isHygieneTarget ? "#d08a62" : clusterColor;
         ctx.fillStyle = hexToRgba(dotColor, alpha);
         ctx.fill();
 
@@ -979,6 +1063,7 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
       // 6. Screen-space Pill Labels with strict AABB Collision-Avoidance
       const placedBoxes: Rect[] = [];
       const clusterPillsHit: PlacedClusterPill[] = [];
+      const clientPillsHit: PlacedClusterPill[] = [];
 
       const tryPlaceBox = (rect: Rect, force = false, pad = 5): boolean => {
         if (!force) {
@@ -1004,6 +1089,7 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
         text: string;
         count?: string;
         dotColor?: string;
+        dotShape?: "circle" | "diamond";
         borderColor: string;
         bgAlpha?: number;
         fontSize: number;
@@ -1041,10 +1127,19 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
         const midY = y0 + h / 2;
 
         if (opts.dotColor) {
-          ctx.beginPath();
-          ctx.arc(cursorX + 3, midY, 3.2, 0, Math.PI * 2);
-          ctx.fillStyle = opts.dotColor;
-          ctx.fill();
+          if (opts.dotShape === "diamond") {
+            drawDiamond(ctx, cursorX + 3.5, midY, 3.8);
+            ctx.fillStyle = opts.dotColor;
+            ctx.fill();
+            ctx.strokeStyle = "rgba(247, 235, 213, 0.8)";
+            ctx.lineWidth = 0.7;
+            ctx.stroke();
+          } else {
+            ctx.beginPath();
+            ctx.arc(cursorX + 3, midY, 3.2, 0, Math.PI * 2);
+            ctx.fillStyle = opts.dotColor;
+            ctx.fill();
+          }
           cursorX += dotW;
         }
 
@@ -1105,6 +1200,7 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
           text: label,
           count,
           dotColor: isClient ? ACCENT_BRASS : clusterColor,
+          dotShape: isClient ? "diamond" : "circle",
           borderColor: border,
           bgAlpha: priority === "active" ? 0.95 : 0.88,
           fontSize: priority === "active" ? 12 : 11,
@@ -1169,7 +1265,8 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
           (Boolean(egoId) && idx.nodeById.get(egoId!)?.cluster_id !== c.id) ||
           (Boolean(selCluster) &&
             !isSel &&
-            !(selectedCategory && c.category === selectedCategory));
+            !(selectedCategory && c.category === selectedCategory)) ||
+          (hygieneActive && !idx.hygieneClusterIds.has(c.id));
 
         if (egoId && curIsolate && dimmed) continue;
 
@@ -1190,8 +1287,8 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
           Boolean(c.category) &&
           (idx.subclustersByCategory.get(c.category!)?.length ?? 0) > 1;
         const label =
-          lod === 1 && c.label.length > 26
-            ? truncateText(c.label, 26)
+          lod === 1
+            ? formatMacroClusterLabel(c.label, c.category)
             : c.label;
 
         let rect: Rect | null = null;
@@ -1246,6 +1343,54 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
       }
 
       placedClusterPillsRef.current = clusterPillsHit;
+
+      // 6c-bis. Macro client markers: compact brass diamond pills so clients stay unmistakable at LOD 1
+      if (!egoId && lod === 1 && !hygieneActive && idx.clientNodes.length > 0) {
+        let shownClients = 0;
+        const maxMacroClients = 16;
+        for (const cn of idx.clientNodes) {
+          if (shownClients >= maxMacroClients) break;
+          if (cn.id === selNode || cn.id === hovNode) continue;
+          if (curFiltered && !curMatched.has(cn.id)) continue;
+          if (selCluster) continue;
+
+          const pt = worldToScreen(cn.x ?? 0, cn.y ?? 0, cam);
+          if (pt.x < 28 || pt.x > width - 28 || pt.y < 56 || pt.y > height - 36) {
+            continue;
+          }
+
+          const rScreen = baseNodeRadius(cn) * Math.pow(cam.k, 0.28) * 1.15;
+          const offsetsY = [
+            -(rScreen + 12),
+            rScreen + 12,
+            -(rScreen + 25),
+            rScreen + 25,
+          ];
+          let rect: Rect | null = null;
+          for (const dy of offsetsY) {
+            rect = drawPill({
+              cx: pt.x,
+              cy: pt.y + dy,
+              text: truncateText(cn.title, 20),
+              dotColor: ACCENT_BRASS,
+              dotShape: "diamond",
+              borderColor: hexToRgba(ACCENT_BRASS, 0.72),
+              bgAlpha: 0.9,
+              fontSize: 10.5,
+              fontWeight: 600,
+              textColor: "#f3e3c6",
+              pad: 3,
+            });
+            if (rect) break;
+          }
+          if (rect) {
+            clientPillsHit.push({ id: cn.id, rect });
+            shownClients++;
+          }
+        }
+      }
+
+      placedClientPillsRef.current = clientPillsHit;
 
       // 6d. Priority 4: Material / Client pills at LOD 2 (Meso) and LOD 3 (Micro)
       // Strictly capped (~22 at Meso, ~25 at Micro) with AABB non-overlap!
@@ -1305,6 +1450,19 @@ const KnowledgeAtlasCanvas = forwardRef<KnowledgeAtlasHandle, Props>(
           }
         }
         if (bestNode) return { kind: "node", node: bestNode };
+
+        // 1b. Check placed client pill rectangles (Macro client markers)
+        for (const p of placedClientPillsRef.current) {
+          if (
+            sx >= p.rect.x0 - 2 &&
+            sx <= p.rect.x1 + 2 &&
+            sy >= p.rect.y0 - 2 &&
+            sy <= p.rect.y1 + 2
+          ) {
+            const clientNode = curNodes.find((n) => n.id === p.id);
+            if (clientNode) return { kind: "node", node: clientNode };
+          }
+        }
 
         // 2. Check placed cluster pill rectangles
         for (const p of placedClusterPillsRef.current) {

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FancySelect } from "@/components/FancySelect";
 import KnowledgeAtlasCanvas, {
   EDGE_COLORS,
+  isUncategorizedMaterial,
   type AtlasLodLevel,
   type AtlasViewMode,
   type KnowledgeAtlasHandle,
@@ -493,8 +494,14 @@ export default function GraphPage() {
   };
 
   const hoveredNodeObj = hoveredNodeId ? nodeById.get(hoveredNodeId) ?? null : null;
-  const hygieneCount =
-    (meta?.uncategorized_count ?? 0) + (meta?.untagged_count ?? 0);
+  const hygieneCount = useMemo(
+    () =>
+      nodes.reduce(
+        (acc, n) => acc + (isUncategorizedMaterial(n) ? 1 : 0),
+        0
+      ),
+    [nodes]
+  );
 
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden bg-[#0b0e0d] text-[var(--ink)]">
@@ -811,7 +818,7 @@ export default function GraphPage() {
                   id: "hygiene",
                   label:
                     hygieneCount > 0
-                      ? `Неразобранное (${meta?.uncategorized_count ?? 0})`
+                      ? `Неразобранное (${hygieneCount})`
                       : "Неразобранное",
                 },
               ] as { id: AtlasViewMode; label: string }[]
@@ -835,6 +842,13 @@ export default function GraphPage() {
               );
             })}
           </div>
+
+          {viewMode === "hygiene" && raw && hygieneCount === 0 && (
+            <div className="atlas-glass inline-flex items-center gap-1.5 rounded-full border border-[var(--accent)]/30 px-2.5 py-1 text-[11px] text-[var(--ink)]/85">
+              <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+              <span>Нет материалов без категории</span>
+            </div>
+          )}
 
           {raw && (
             <div className="atlas-glass flex items-center gap-2 rounded-full px-3 py-1 text-[11.5px] text-[var(--muted)]">
@@ -1010,7 +1024,7 @@ export default function GraphPage() {
 
           {/* STATE A: NODE INSPECTOR (Material or Client) */}
           {selectedNode ? (
-            <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               <div className="flex items-center justify-between gap-2 border-b border-white/[0.08] px-4 py-3">
                 <div className="flex min-w-0 items-center gap-2">
                   {selectedNode.type === "client" ? (
@@ -1060,9 +1074,9 @@ export default function GraphPage() {
                 </button>
               </div>
 
-              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3.5">
-                <div>
-                  <h2 className="text-[15.5px] font-semibold leading-snug text-[var(--ink)]">
+              <div className="min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-4 py-3.5">
+                <div className="min-w-0">
+                  <h2 className="break-words [overflow-wrap:anywhere] text-[15.5px] font-semibold leading-snug text-[var(--ink)]">
                     {selectedNode.title}
                   </h2>
                   <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-[var(--muted)]">
@@ -1081,7 +1095,7 @@ export default function GraphPage() {
                 </div>
 
                 {selectedNode.summary && (
-                  <p className="text-[12.5px] leading-relaxed text-[var(--ink)]/82">
+                  <p className="break-words [overflow-wrap:anywhere] text-[12.5px] leading-relaxed text-[var(--ink)]/82">
                     {selectedNode.summary}
                   </p>
                 )}
@@ -1089,7 +1103,7 @@ export default function GraphPage() {
                 {/* Tools & Tags chips */}
                 {((selectedNode.tools && selectedNode.tools.length > 0) ||
                   (selectedNode.tags && selectedNode.tags.length > 0)) && (
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex min-w-0 flex-wrap gap-1.5">
                     {(selectedNode.tools || []).slice(0, 8).map((tool) => {
                       const active =
                         toolFilter.toLowerCase() === tool.toLowerCase();
@@ -1100,7 +1114,7 @@ export default function GraphPage() {
                           onClick={() =>
                             setToolFilter(active ? "" : tool.toLowerCase())
                           }
-                          className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                          className={`max-w-full break-words [overflow-wrap:anywhere] rounded-full border px-2.5 py-0.5 text-left text-[11px] transition ${
                             active
                               ? "border-[var(--accent)] bg-[var(--accent)]/20 text-[var(--accent)]"
                               : "border-[var(--accent)]/25 bg-[var(--accent)]/[0.08] text-[var(--accent)]/90 hover:border-[var(--accent)]/60"
@@ -1120,7 +1134,7 @@ export default function GraphPage() {
                           onClick={() =>
                             setTagFilter(active ? "" : tg.toLowerCase())
                           }
-                          className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                          className={`max-w-full break-words [overflow-wrap:anywhere] rounded-full border px-2.5 py-0.5 text-left text-[11px] transition ${
                             active
                               ? "border-white/50 bg-white/15 text-[var(--ink)]"
                               : "border-white/12 bg-white/[0.04] text-[var(--muted)] hover:border-white/30 hover:text-[var(--ink)]"
@@ -1206,14 +1220,14 @@ export default function GraphPage() {
                                 key={`${sec.key}-${rel.node.id}`}
                                 type="button"
                                 onClick={() => handleSelectNode(rel.node.id)}
-                                className="flex w-full items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-white/[0.025] px-2.5 py-2 text-left transition hover:border-white/20 hover:bg-white/[0.06]"
+                                className="flex w-full min-w-0 items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-white/[0.025] px-2.5 py-2 text-left transition hover:border-white/20 hover:bg-white/[0.06]"
                               >
-                                <span className="min-w-0 truncate text-[12.5px] text-[var(--ink)]">
+                                <span className="min-w-0 flex-1 truncate text-[12.5px] text-[var(--ink)]">
                                   {rel.node.title}
                                 </span>
                                 {rel.badge && (
                                   <span
-                                    className="shrink-0 rounded-full px-2 py-0.5 text-[10.5px]"
+                                    className="max-w-[45%] shrink-0 truncate rounded-full px-2 py-0.5 text-[10.5px]"
                                     style={{
                                       color: sec.color,
                                       backgroundColor: "rgba(255,255,255,0.05)",
@@ -1243,7 +1257,7 @@ export default function GraphPage() {
             </div>
           ) : selectedCluster ? (
             /* STATE B: CLUSTER INSPECTOR */
-            <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               <div className="flex items-start justify-between gap-2 border-b border-white/[0.08] px-4 py-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
@@ -1294,7 +1308,7 @@ export default function GraphPage() {
                 </div>
               </div>
 
-              <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-3.5">
+              <div className="min-h-0 min-w-0 flex-1 space-y-3.5 overflow-y-auto overflow-x-hidden px-4 py-3.5">
                 {/* Sibling subclusters switcher for big categories like AI */}
                 {siblingSubclusters.length > 1 && (
                   <div>
@@ -1344,7 +1358,7 @@ export default function GraphPage() {
                           onClick={() =>
                             setToolFilter(active ? "" : t.toLowerCase())
                           }
-                          className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                          className={`max-w-full break-words [overflow-wrap:anywhere] rounded-full border px-2.5 py-0.5 text-left text-[11px] transition ${
                             active
                               ? "border-[var(--accent)] bg-[var(--accent)]/20 text-[var(--accent)]"
                               : "border-[var(--accent)]/25 bg-[var(--accent)]/[0.08] text-[var(--accent)]/90 hover:border-[var(--accent)]/60"
@@ -1363,7 +1377,7 @@ export default function GraphPage() {
                           onClick={() =>
                             setTagFilter(active ? "" : tg.toLowerCase())
                           }
-                          className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                          className={`max-w-full break-words [overflow-wrap:anywhere] rounded-full border px-2.5 py-0.5 text-left text-[11px] transition ${
                             active
                               ? "border-white/50 bg-white/15 text-[var(--ink)]"
                               : "border-white/12 bg-white/[0.04] text-[var(--muted)] hover:border-white/30 hover:text-[var(--ink)]"
@@ -1414,10 +1428,10 @@ export default function GraphPage() {
                         key={m.id}
                         type="button"
                         onClick={() => handleSelectNode(m.id)}
-                        className="group flex w-full flex-col gap-1 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2 text-left transition hover:border-[var(--accent)]/40 hover:bg-white/[0.06]"
+                        className="group flex w-full min-w-0 flex-col gap-1 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2 text-left transition hover:border-[var(--accent)]/40 hover:bg-white/[0.06]"
                       >
-                        <div className="flex items-start justify-between gap-2">
-                          <span className="line-clamp-2 text-[12.5px] leading-snug text-[var(--ink)] group-hover:text-white">
+                        <div className="flex w-full min-w-0 items-start justify-between gap-2">
+                          <span className="min-w-0 flex-1 line-clamp-2 break-words [overflow-wrap:anywhere] text-[12.5px] leading-snug text-[var(--ink)] group-hover:text-white">
                             {m.title}
                           </span>
                           {m.score != null && (
@@ -1432,10 +1446,12 @@ export default function GraphPage() {
                             </span>
                           )}
                         </div>
-                        <div className="flex items-center gap-1.5 text-[10.5px] text-[var(--muted)]">
-                          <span>{sourceLabel(m.source_type)}</span>
+                        <div className="flex w-full min-w-0 items-center gap-1.5 text-[10.5px] text-[var(--muted)]">
+                          <span className="shrink-0">
+                            {sourceLabel(m.source_type)}
+                          </span>
                           {m.tools && m.tools.length > 0 && (
-                            <span className="truncate">
+                            <span className="min-w-0 truncate">
                               · {m.tools.slice(0, 2).join(", ")}
                             </span>
                           )}
