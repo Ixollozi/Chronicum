@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.config import get_settings
@@ -298,18 +300,32 @@ async def delete_key(session: AsyncSession, key_id: int) -> None:
 
 
 _rr_counters: dict[str, int] = {}
+_KEY_OK_TOUCH_INTERVAL_SEC = 60.0
+_last_ok_touch: dict[int, float] = {}
+
+
+def reset_key_touch_cache() -> None:
+    """Clear in-memory last_ok_at throttle cache (useful for tests)."""
+    _last_ok_touch.clear()
 
 
 async def _commit_isolated(session: AsyncSession, fn) -> None:
     """
-    Persist key-pool metadata without committing the caller's open Material transaction.
-    Uses a short-lived sibling session on the same engine whenever safe; if the caller
-    already holds an open SQLite transaction, mutates inside the caller's session
-    without issuing an early commit (preventing premature commits AND SQLite lock deadlocks).
+    Persist key-pool metadata without committing the caller's open Material transaction
+    and without holding a SQLite writer lock across slow external I/O.
+
+    When the caller already has pending writes (new/dirty/deleted) or runs against an
+    in-memory SQLite DB, mutate inside the caller's session via flush() to prevent
+    premature commits and self-deadlocks. When the caller only has an open read
+    transaction from prior SELECTs, commit via a short-lived sibling session so
+    SQLite's global write lock is released immediately.
     """
     bind = session.get_bind()
     is_sqlite = getattr(getattr(bind, "dialect", None), "name", "") == "sqlite"
-    if is_sqlite and (session.in_transaction() or session.new or session.dirty or session.deleted):
+    url_str = str(getattr(bind, "url", "") or "")
+    is_memory_sqlite = is_sqlite and (":memory:" in url_str or not url_str)
+    has_pending_writes = bool(session.new or session.dirty or session.deleted)
+    if is_sqlite and (has_pending_writes or is_memory_sqlite):
         await fn(session)
         await session.flush()
         return
@@ -372,6 +388,14 @@ async def mark_key_result(session: AsyncSession, key_id: int | str, *, ok: bool,
     if isinstance(key_id, str):
         return
 
+    now_mono = time.monotonic()
+    if ok:
+        last_ts = _last_ok_touch.get(key_id)
+        if last_ts is not None and (now_mono - last_ts) < _KEY_OK_TOUCH_INTERVAL_SEC:
+            return
+    else:
+        _last_ok_touch.pop(key_id, None)
+
     async def _update(s: AsyncSession) -> None:
         row = await s.get(ApiKey, key_id)
         if not row:
@@ -382,7 +406,14 @@ async def mark_key_result(session: AsyncSession, key_id: int | str, *, ok: bool,
         else:
             row.last_error = (error or "error")[:500]
 
-    await _commit_isolated(session, _update)
+    try:
+        await _commit_isolated(session, _update)
+        if ok:
+            _last_ok_touch[key_id] = now_mono
+    except OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            raise
+        log.warning("key_result_persist_skipped_locked", key_id=key_id, ok=ok, error=str(exc)[:160])
 
 
 async def any_provider_ready(session: AsyncSession) -> bool:

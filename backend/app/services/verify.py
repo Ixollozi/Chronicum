@@ -52,16 +52,20 @@ async def verify_url(url: str, *, timeout: float = 5.0) -> dict:
     return dict(result)
 
 
-async def verify_links(links: list[dict]) -> list[dict]:
-    out: list[dict] = []
-    for li in links or []:
-        url = str(li.get("url") or "")
-        if not url:
-            continue
-        res = await verify_url(url)
-        merged = {**li, **res}
-        out.append(merged)
-    return out
+async def verify_links(links: list[dict], *, concurrency: int = 6) -> list[dict]:
+    import asyncio
+
+    items = [li for li in (links or []) if str(li.get("url") or "").strip()]
+    if not items:
+        return []
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _one(li: dict) -> dict:
+        async with sem:
+            res = await verify_url(str(li.get("url") or ""))
+            return {**li, **res}
+
+    return list(await asyncio.gather(*(_one(li) for li in items)))
 
 
 _REPO_CACHE: dict[str, tuple[float, dict | None]] = {}

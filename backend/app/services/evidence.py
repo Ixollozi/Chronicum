@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 _TS = re.compile(r"^\[(\d{1,3}):(\d{2})(?:\.(\d+))?\]\s*(.*)$")
 _OCR_TS = re.compile(r"^\[OCR\s+(\d{1,3}):(\d{2})(?:\.(\d+))?\]\s*(.*)$")
 _SLIDE = re.compile(r"^\[Слайд\s+(\d+)\]\s*(.*)$")
+_PDF_PAGE_DIV = re.compile(r"^---\s*Страница\s+\d+(?:\s*/\s*\d+)?(?:\s*\(OCR\))?\s*---$", re.I)
 
 
 @dataclass
@@ -49,6 +50,8 @@ def build_evidence(raw_text: str | None, *, source_type: str = "") -> list[dict]
             continue
         if s.startswith("[On-screen"):
             in_ocr = True
+            continue
+        if _PDF_PAGE_DIV.match(s):
             continue
         if s.startswith("[Vision]"):
             segs.append(EvidenceSegment("vision", s[len("[Vision]") :].strip(), confidence=0.4))

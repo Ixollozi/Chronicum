@@ -20,6 +20,7 @@ SUMMARY_FIELDS = (
     "processing_stage",
     "trust_level",
     "analysis_confidence",
+    "created_at",
 )
 
 CARD_EXTRA_FIELDS = (
@@ -54,6 +55,7 @@ TEACH_FIELDS = (
     "key_moments",
     "code_blocks",
     "source_url",
+    "created_at",
 )
 
 FULL_DROP = ("usage_tokens_in", "usage_tokens_out", "usage_audio_seconds")
@@ -78,6 +80,7 @@ def list_card(item: dict[str, Any]) -> dict[str, Any]:
         "tags": item.get("tags") or [],
         "source_type": item.get("source_type"),
         "entry_kind": item.get("entry_kind") or "knowledge",
+        "created_at": item.get("created_at"),
         "summary": clip(item.get("summary") or item.get("main_idea")),
     }
 

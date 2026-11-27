@@ -10,6 +10,7 @@ from app.pipelines.media_bundle import MediaBundle
 from app.pipelines.youtube import (
     YouTubeCaptions,
     _candidate_caption_tracks,
+    _match_track_key,
     parse_subtitle_payload,
 )
 
@@ -96,6 +97,32 @@ def test_candidate_caption_tracks_prefers_manual_over_auto_and_json3():
         ("de", False, "https://sub/de.vtt"),
         ("ru", True, "https://auto/ru.json3"),
         ("en", True, "https://auto/en.json3"),
+    ]
+
+
+def test_match_track_key_and_candidates_prefer_orig_for_auto_captions():
+    auto_tracks = {
+        "en": [{"ext": "json3", "url": "https://auto/en-trans.json3"}],
+        "ru": [{"ext": "json3", "url": "https://auto/ru-from-en.json3"}],
+        "en-US-orig": [{"ext": "json3", "url": "https://auto/en-us-orig.json3"}],
+        "ru-orig": [{"ext": "json3", "url": "https://auto/ru-orig.json3"}],
+    }
+    assert _match_track_key(auto_tracks, "ru", prefer_orig=True) == "ru-orig"
+    assert _match_track_key(auto_tracks, "en", prefer_orig=True) == "en-US-orig"
+    # Manual mode keeps exact match priority
+    assert _match_track_key(auto_tracks, "ru", prefer_orig=False) == "ru"
+    # Fallback when -orig is absent
+    assert _match_track_key({"ru": auto_tracks["ru"]}, "ru", prefer_orig=True) == "ru"
+
+    info = {
+        "language": "en-US",
+        "subtitles": {},
+        "automatic_captions": auto_tracks,
+    }
+    tracks = _candidate_caption_tracks(info, languages=("ru", "en"))
+    assert [(lang, is_auto, tr["url"]) for lang, is_auto, tr in tracks] == [
+        ("ru", True, "https://auto/ru-orig.json3"),
+        ("en", True, "https://auto/en-us-orig.json3"),
     ]
 
 

@@ -80,13 +80,17 @@ def is_rate_limit_error(error: str | None) -> bool:
 
 
 def is_transient_rate_limit_error(error: str | None) -> bool:
-    """True for short-lived TPM/RPM 429s worth waiting out; False for 401/auth or daily TPD limits."""
+    """True for short-lived TPM/RPM 429s worth waiting out; False for 401/auth, 413 payload size, or daily TPD limits."""
     msg = (error or "").lower()
     if not is_rate_limit_error(msg):
         return False
     if any(
         tok in msg
         for tok in (
+            "413",
+            "request too large",
+            "payload too large",
+            "entity too large",
             "401",
             "invalid api key",
             "invalid_api_key",

@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -225,11 +226,17 @@ async def _apply_card(session: AsyncSession, material: Material, card, cat_map, 
         duration_seconds=getattr(material, "duration_seconds", None),
         title=material.title or getattr(card, "title", "") or "",
     )
-    _, speech_weak = strip_weak_speech_from_raw(material.raw_text or "")
-    speech_off = is_speech_offtopic(material.raw_text or "", screen_tools=harvest.tools)
-    unreliable = speech_weak or speech_off or speech_unreliable(
-        material.raw_text or "", screen_tools=harvest.tools
-    )
+    is_text_doc = material.source_type in {"pdf", "article", "note"}
+    if is_text_doc:
+        speech_weak = False
+        speech_off = False
+        unreliable = False
+    else:
+        _, speech_weak = strip_weak_speech_from_raw(material.raw_text or "")
+        speech_off = is_speech_offtopic(material.raw_text or "", screen_tools=harvest.tools)
+        unreliable = speech_weak or speech_off or speech_unreliable(
+            material.raw_text or "", screen_tools=harvest.tools
+        )
 
     if getattr(card, "digest", None):
         dig = normalize_brand_names(card.digest)
@@ -473,8 +480,23 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
     await session.commit()
 
     async def _set_progress(step: str) -> None:
-        material.processing_stage = step
-        await session.commit()
+        nonlocal material
+        try:
+            material.processing_stage = step
+            await session.commit()
+        except OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            log.warning("progress_update_skipped_locked", material_id=material_id, step=step)
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            reloaded = (
+                await session.execute(select(Material).where(Material.id == material_id))
+            ).scalars().first()
+            if reloaded is not None:
+                material = reloaded
 
     try:
         if not settings.ai_ready and not await any_provider_ready(session):
@@ -518,23 +540,32 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
             stage = ProcessingStage.FULL.value
 
         material.raw_text = raw_text
-        if title and (not material.title or material.title.startswith(f"{material.source_type}:")):
+        if title and (
+            not material.title
+            or material.title.startswith(f"{material.source_type}:")
+            or (material.source_type == "pdf" and material.title.lower().endswith(".pdf"))
+        ):
             material.title = title
         material.usage_audio_seconds = (material.usage_audio_seconds or 0) + (audio_sec or 0)
-        await _set_progress(ProcessingProgress.CARD.value)
+        material.processing_stage = ProcessingProgress.CARD.value
+        await session.commit()
 
         categories, tags, cat_map, tag_map = await _taxonomy(session)
         from app.services.resources import is_speech_offtopic, strip_weak_speech_from_raw
 
-        _cleaned, speech_weak = strip_weak_speech_from_raw(raw_text)
         harvest = harvest_resources(
             raw_text,
             duration_seconds=material.duration_seconds,
         )
         screen_resources = harvest.prompt_block()
-        speech_offtopic = (not speech_weak) and is_speech_offtopic(
-            raw_text, screen_tools=harvest.tools
-        )
+        if material.source_type in {"pdf", "article", "note"}:
+            speech_weak = False
+            speech_offtopic = False
+        else:
+            _cleaned, speech_weak = strip_weak_speech_from_raw(raw_text)
+            speech_offtopic = (not speech_weak) and is_speech_offtopic(
+                raw_text, screen_tools=harvest.tools
+            )
         llm = await analyze_material(
             raw_text,
             categories=categories,
@@ -548,6 +579,7 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
             speech_weak=speech_weak,
             speech_offtopic=speech_offtopic,
         )
+        cat_name, applied_tag_names = await _apply_card(session, material, llm.card, cat_map, tag_map)
         material.usage_tokens_in = (material.usage_tokens_in or 0) + llm.tokens_in
         material.usage_tokens_out = (material.usage_tokens_out or 0) + llm.tokens_out
         meta = dict(material.usage_meta or {})
@@ -563,14 +595,15 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
             }
         )
         material.usage_meta = meta
+        # Release SQLite writer lock before slow post-enrichment / embedding calls
+        # and ensure the parsed card survives even if optional enrichment rolls back.
+        await session.commit()
 
-        cat_name, applied_tag_names = await _apply_card(session, material, llm.card, cat_map, tag_map)
-
+        target_status = ProcessingStatus.DONE.value
         if stage == ProcessingStage.PREVIEW.value:
             if llm.card.usefulness_score >= settings.video_full_score_threshold:
-                await session.commit()
                 return await process_material(session, material_id, force_full=True)
-            material.processing_status = ProcessingStatus.AWAITING_FULL.value
+            target_status = ProcessingStatus.AWAITING_FULL.value
         else:
             # Enrichment based on settings (reload material after nested commits)
             try:
@@ -614,11 +647,21 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
                     )
                     # Atlas OCR often improves during moments — refresh tools + offtopic digest
                     _refresh_card_after_ocr(material)
+                    await session.commit()
             except Exception as e:
                 log.warning("post_enrich_failed", material_id=material_id, error=str(e)[:300])
-            material.processing_status = ProcessingStatus.DONE.value
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
+                reloaded = (
+                    await session.execute(select(Material).where(Material.id == material_id))
+                ).scalars().first()
+                if reloaded is not None:
+                    material = reloaded
 
-        # Compute embedding after post-enrichment/OCR refresh so vector matches persisted card
+        # Compute embedding with a clean session (no dirty writes / SQLite lock during HTTP)
+        emb = None
         try:
             from app.search.embeddings import compute_embedding, material_embedding_text
 
@@ -628,12 +671,13 @@ async def process_material(session: AsyncSession, material_id: str, *, force_ful
                 tag_names=applied_tag_names,
             )
             emb = await compute_embedding(emb_text, settings=settings, session=session)
-            if emb is not None:
-                material.embedding = emb
         except Exception as exc:
             log.warning("material_embedding_failed", material_id=material_id, error=str(exc)[:200])
 
-        # Persist depth stage (preview|full) and guarantee clean error state after completion
+        # Persist final status, embedding, and depth stage in one short transaction
+        material.processing_status = target_status
+        if emb is not None:
+            material.embedding = emb
         material.processing_stage = stage
         material.error_message = None
         await _refresh_search_vector(session, material.id)

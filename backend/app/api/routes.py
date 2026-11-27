@@ -1099,6 +1099,7 @@ async def check_api_keys(provider: str = Query(...), session: AsyncSession = Dep
             failed += 1
             await mark_key_result(session, pk.id, ok=False, error=str(e)[:200])
             details.append({"id": pk.id, "ok": False, "error": str(e)[:200]})
+    await session.commit()
     return KeysCheckResponse(provider=provider, ok=ok, failed=failed, details=details)
 
 

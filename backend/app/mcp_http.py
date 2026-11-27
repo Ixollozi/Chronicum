@@ -13,13 +13,24 @@ _mcp: Any = None
 _asgi: Any = None
 
 
+def _resolve_runtime_api_url(settings: Any) -> str | None:
+    explicit = (getattr(settings, "chronicum_api_url", "") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    port = getattr(settings, "chronicum_api_port", None)
+    if port:
+        return f"http://127.0.0.1:{int(port)}"
+    return None
+
+
 def _current_mcp_auth_policy() -> tuple[str, bool]:
     settings = get_settings()
     token = (settings.web_api_token or "").strip()
     try:
-        from chronicum_mcp.config import set_runtime_token
+        from chronicum_mcp.config import set_runtime_api_url, set_runtime_token
 
         set_runtime_token(token)
+        set_runtime_api_url(_resolve_runtime_api_url(settings))
     except Exception:
         pass
     return token, bool(settings.allow_placeholder_secrets)

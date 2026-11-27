@@ -149,8 +149,39 @@ class RateLimitError(Exception):
     pass
 
 
+class PayloadTooLargeError(RateLimitError):
+    """Prompt exceeds a provider's per-request token / TPM limit (e.g. Groq 413)."""
+    pass
+
+
 class SchemaValidationError(Exception):
     pass
+
+
+def _classify_groq_error(exc: Exception) -> None:
+    """Re-raise Groq 413 / 429 / 401 errors as PayloadTooLargeError or RateLimitError."""
+    status = getattr(exc, "status_code", None)
+    msg = str(exc).lower()
+    if (
+        status == 413
+        or "413" in msg
+        or "request too large" in msg
+        or "payload too large" in msg
+        or "entity too large" in msg
+        or ("tokens per minute" in msg and "requested" in msg)
+    ):
+        raise PayloadTooLargeError(str(exc)) from exc
+    if (
+        status in (401, 429)
+        or "429" in msg
+        or "rate limit" in msg
+        or "rate_limit" in msg
+        or "quota" in msg
+        or "401" in msg
+        or "invalid api key" in msg
+        or "auth" in msg
+    ):
+        raise RateLimitError(str(exc)) from exc
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -229,11 +260,7 @@ class GroqLLMClient(LLMClient):
                 response_format={"type": "json_object"},
             )
         except Exception as e:
-            msg = str(e).lower()
-            if "429" in msg or "rate limit" in msg or "quota" in msg:
-                raise RateLimitError(str(e)) from e
-            if "401" in msg or "invalid api key" in msg or "auth" in msg:
-                raise RateLimitError(str(e)) from e
+            _classify_groq_error(e)
             raise
 
         content = resp.choices[0].message.content or ""
@@ -263,9 +290,7 @@ class GroqLLMClient(LLMClient):
                 ],
             )
         except Exception as e:
-            msg = str(e).lower()
-            if "429" in msg or "rate limit" in msg or "quota" in msg or "401" in msg:
-                raise RateLimitError(str(e)) from e
+            _classify_groq_error(e)
             raise
         return (resp.choices[0].message.content or "").strip()
 
@@ -295,6 +320,27 @@ class GoogleLLMClient(LLMClient):
             genai.configure(api_key=self.api_key)
             model = genai.GenerativeModel(self.model_name)
             return model.generate_content(prompt, generation_config=generation_config)
+
+    @staticmethod
+    def _extract_usage(resp: Any) -> tuple[int, int]:
+        meta = getattr(resp, "usage_metadata", None)
+        if meta is None:
+            return 0, 0
+
+        def _get_int(name: str) -> int:
+            val = meta.get(name) if isinstance(meta, dict) else getattr(meta, name, 0)
+            try:
+                return max(0, int(val or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        tokens_in = _get_int("prompt_token_count")
+        tokens_out = _get_int("candidates_token_count")
+        if tokens_out == 0:
+            total = _get_int("total_token_count")
+            if total > tokens_in:
+                tokens_out = total - tokens_in
+        return tokens_in, tokens_out
 
     @retry(
         retry=retry_if_exception_type(SchemaValidationError),
@@ -328,7 +374,14 @@ class GoogleLLMClient(LLMClient):
         except Exception as e:
             raise SchemaValidationError(str(e)) from e
 
-        return LLMResult(card=card, tokens_in=0, tokens_out=0, provider="google", model=self.model_name)
+        tokens_in, tokens_out = self._extract_usage(resp)
+        return LLMResult(
+            card=card,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            provider="google",
+            model=self.model_name,
+        )
 
     async def complete_text(self, system: str, user: str) -> str:
         import asyncio
@@ -686,13 +739,90 @@ async def get_llm_client_pooled(session) -> LLMClient:
 
 LLM_RATE_LIMIT_WAIT_ROUNDS = 2
 LLM_MAX_RETRY_WAIT_SEC = 45.0
+GROQ_SAFE_INPUT_TOKENS = 5000
+SINGLE_SHOT_MAX_CHARS = 120000
+CHUNK_TARGET_CHARS = 8500
+_PAGE_MARKER_SPLIT_RE = re.compile(r"(?m)(?=^---\s*Страница\s+\d+)")
 
 
-async def with_llm_fallback(session, fn):
+def estimate_tokens(text: str) -> int:
+    """Conservative token estimate accounting for denser Cyrillic tokenization."""
+    if not text:
+        return 0
+    cyr = sum(1 for c in text if "\u0400" <= c <= "\u04FF")
+    non_cyr = len(text) - cyr
+    return int(cyr / 2.0 + non_cyr / 3.5) + 1
+
+
+def split_document_chunks(text: str, *, max_chars: int = CHUNK_TARGET_CHARS) -> list[str]:
+    """Split a long document along page boundaries, then paragraphs/lines, keeping each chunk <= max_chars."""
+    s = (text or "").strip()
+    if not s:
+        return []
+    if len(s) <= max_chars:
+        return [s]
+
+    # Prefer PDF page boundaries when present
+    raw_sections = [sec.strip() for sec in _PAGE_MARKER_SPLIT_RE.split(s) if sec.strip()]
+    if len(raw_sections) <= 1:
+        raw_sections = [sec.strip() for sec in re.split(r"\n{2,}", s) if sec.strip()]
+
+    units: list[str] = []
+    for sec in raw_sections:
+        if len(sec) <= max_chars:
+            units.append(sec)
+            continue
+        # Sub-split oversized page/section by paragraph, then line, then hard slice
+        paras = [p.strip() for p in re.split(r"\n{2,}", sec) if p.strip()]
+        if len(paras) > 1:
+            for p in paras:
+                if len(p) <= max_chars:
+                    units.append(p)
+                else:
+                    for i in range(0, len(p), max_chars):
+                        units.append(p[i : i + max_chars])
+        else:
+            lines = [ln for ln in sec.splitlines() if ln.strip()]
+            buf = ""
+            for ln in lines:
+                if len(ln) > max_chars:
+                    if buf:
+                        units.append(buf)
+                        buf = ""
+                    for i in range(0, len(ln), max_chars):
+                        units.append(ln[i : i + max_chars])
+                elif not buf:
+                    buf = ln
+                elif len(buf) + 1 + len(ln) <= max_chars:
+                    buf = f"{buf}\n{ln}"
+                else:
+                    units.append(buf)
+                    buf = ln
+            if buf:
+                units.append(buf)
+
+    chunks: list[str] = []
+    cur = ""
+    for u in units:
+        if not cur:
+            cur = u
+        elif len(cur) + 2 + len(u) <= max_chars:
+            cur = f"{cur}\n\n{u}"
+        else:
+            chunks.append(cur)
+            cur = u
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+async def with_llm_fallback(session, fn, *, prefer_providers: list[str] | None = None):
     """
     Call async fn(client); rotate across keys/providers on RateLimitError.
     If every key hits a short transient TPM/RPM 429, wait out the shortest
     retry-after window (up to LLM_RATE_LIMIT_WAIT_ROUNDS) before giving up.
+    On PayloadTooLargeError (e.g. Groq 413), immediately move to the next provider
+    without cooling down the healthy key.
     """
     import asyncio
 
@@ -705,14 +835,24 @@ async def with_llm_fallback(session, fn):
     from app.services.key_pool import acquire_keys, mark_key_result
 
     settings = get_settings()
-    preferred = settings.ai_provider if settings.ai_provider in {"groq", "google"} else "groq"
-    order = [preferred] + [p for p in ("groq", "google") if p != preferred]
+    if prefer_providers:
+        order: list[str] = []
+        for p in prefer_providers:
+            if p in {"groq", "google"} and p not in order:
+                order.append(p)
+        for p in ("groq", "google"):
+            if p not in order:
+                order.append(p)
+    else:
+        preferred = settings.ai_provider if settings.ai_provider in {"groq", "google"} else "groq"
+        order = [preferred] + [p for p in ("groq", "google") if p != preferred]
     errors: list[str] = []
 
     for wait_round in range(LLM_RATE_LIMIT_WAIT_ROUNDS + 1):
         shortest_wait: float | None = None
         saw_transient = False
         attempted_any = False
+        saw_payload_too_large = False
 
         for provider in order:
             keys = await acquire_keys(session, provider)
@@ -730,6 +870,11 @@ async def with_llm_fallback(session, fn):
                     result = await with_llm_slot(fn(client))
                     await mark_key_result(session, pk.id, ok=True)
                     return result
+                except PayloadTooLargeError as e:
+                    saw_payload_too_large = True
+                    errors.append(f"{provider}:{pk.id}: {e}")
+                    # Prompt exceeds this provider's model TPM/context limit — fail over to next provider immediately
+                    break
                 except RateLimitError as e:
                     err_str = str(e)
                     errors.append(f"{provider}:{pk.id}: {err_str}")
@@ -765,6 +910,8 @@ async def with_llm_fallback(session, fn):
 
         break
 
+    if saw_payload_too_large and not saw_transient:
+        raise PayloadTooLargeError("All API providers rejected prompt size: " + "; ".join(errors[:5]))
     raise RuntimeError("All API keys exhausted: " + "; ".join(errors[:5]))
 
 
@@ -858,6 +1005,80 @@ def get_transcribe_client(settings: Settings | None = None) -> TranscribeClient:
     return GroqTranscribeClient(settings, key, key_id="env:groq")
 
 
+async def _has_provider_keys(session, provider: str, settings: Settings) -> bool:
+    if session is not None:
+        try:
+            from app.services.key_pool import acquire_keys
+
+            return bool(await acquire_keys(session, provider))
+        except Exception:
+            return False
+    if provider == "google":
+        return bool((settings.google_ai_api_key or "").strip())
+    return bool((settings.groq_api_key or "").strip().lower() not in _PLACEHOLDERS)
+
+
+async def _condense_large_document(
+    raw_text: str,
+    *,
+    session,
+    settings: Settings,
+    prefer_providers: list[str] | None = None,
+    chunk_chars: int = CHUNK_TARGET_CHARS,
+    max_chunks: int = 12,
+) -> str:
+    """Map-reduce compression for large documents so every section/tool/URL fits LLM token budgets."""
+    chunks = split_document_chunks(raw_text, max_chars=chunk_chars)
+    if len(chunks) <= 1:
+        return raw_text[:chunk_chars]
+
+    # If a massive document exceeds max_chunks, evenly sample indices covering start, middle, and end
+    if len(chunks) > max_chunks:
+        step = (len(chunks) - 1) / float(max_chunks - 1)
+        picked = sorted({int(round(i * step)) for i in range(max_chunks)})
+        chunks = [chunks[i] for i in picked]
+
+    chunk_system = (
+        "You compress one section of a larger document for a personal knowledge base. "
+        "Respond in the source language (Russian if Russian). "
+        "Return compact structured bullets (max ~750 chars): section topic, key facts/steps, "
+        "every concrete tool/product name mentioned, and copy any http(s) URLs verbatim. "
+        "Do NOT invent anything not in the chunk."
+    )
+
+    notes: list[str] = []
+    for idx, ch in enumerate(chunks, 1):
+        prompt = f"Fragment {idx}/{len(chunks)}:\n\n{ch}"
+        try:
+            if session is not None:
+                async def _run_chunk(client: LLMClient, p: str = prompt) -> str:
+                    return await client.complete_text(chunk_system, p)
+
+                summary = await with_llm_fallback(session, _run_chunk, prefer_providers=prefer_providers)
+            else:
+                from app.services.ai_limits import with_llm_slot
+
+                client = get_llm_client(settings)
+                summary = await with_llm_slot(client.complete_text(chunk_system, prompt))
+            if summary:
+                notes.append(f"[Фрагмент {idx}/{len(chunks)}]\n{summary.strip()}")
+        except Exception as exc:
+            log.warning("doc_chunk_condense_failed", chunk=idx, total=len(chunks), error=str(exc)[:200])
+            # Fallback to compact excerpt of this chunk so we never silently drop it
+            notes.append(f"[Фрагмент {idx}/{len(chunks)}]\n{ch[:700].strip()}")
+
+    # Preserve document metadata header + all unique URLs verbatim for grounding
+    header_lines = [ln for ln in raw_text.splitlines()[:8] if ln.strip() and not ln.startswith("---")]
+    urls = list(dict.fromkeys(re.findall(r"https?://[^\s<>\"')\]]+", raw_text)))
+    parts: list[str] = []
+    if header_lines:
+        parts.append("\n".join(header_lines[:6]))
+    parts.append("\n\n".join(notes))
+    if urls:
+        parts.append("Ссылки из документа:\n" + "\n".join(urls[:40]))
+    return "\n\n".join(p for p in parts if p).strip()
+
+
 async def analyze_material(
     raw_text: str,
     *,
@@ -928,22 +1149,80 @@ async def analyze_material(
             "actionability ≤ 3; keep usefulness honest and low-to-mid."
         )
     res_block = (screen_resources or "").strip()
-    user = (
-        f"{res_block}\n\nMaterial text:\n\n{raw_text[:120000]}"
-        if res_block
-        else f"Material text:\n\n{raw_text[:120000]}"
-    )
 
-    if session is not None:
-        async def _run(client: LLMClient) -> LLMResult:
-            return await client.complete_json(system, user)
+    def _build_user(doc_text: str) -> str:
+        return (
+            f"{res_block}\n\nMaterial text:\n\n{doc_text}"
+            if res_block
+            else f"Material text:\n\n{doc_text}"
+        )
 
-        result = await with_llm_fallback(session, _run)
-    else:
+    async def _call_json(user_prompt: str, *, prefer_providers: list[str] | None = None) -> LLMResult:
+        if session is not None:
+            async def _run(client: LLMClient) -> LLMResult:
+                return await client.complete_json(system, user_prompt)
+
+            return await with_llm_fallback(session, _run, prefer_providers=prefer_providers)
         from app.services.ai_limits import with_llm_slot
 
         client = get_llm_client(settings)
-        result = await with_llm_slot(client.complete_json(system, user))
+        return await with_llm_slot(client.complete_json(system, user_prompt))
+
+    has_google = await _has_provider_keys(session, "google", settings)
+    doc_for_analysis = raw_text
+
+    if len(raw_text) > SINGLE_SHOT_MAX_CHARS:
+        log.info("analyze_large_doc_map_reduce", chars=len(raw_text), has_google=has_google)
+        doc_for_analysis = await _condense_large_document(
+            raw_text,
+            session=session,
+            settings=settings,
+            prefer_providers=["google", "groq"] if has_google else None,
+            chunk_chars=24000 if has_google else CHUNK_TARGET_CHARS,
+        )
+
+    user = _build_user(doc_for_analysis[:SINGLE_SHOT_MAX_CHARS])
+    est_tokens = estimate_tokens(system + "\n\n" + user)
+
+    if est_tokens > GROQ_SAFE_INPUT_TOKENS:
+        if has_google:
+            try:
+                result = await _call_json(user, prefer_providers=["google", "groq"])
+            except (PayloadTooLargeError, RuntimeError) as exc:
+                low = str(exc).lower()
+                if not isinstance(exc, PayloadTooLargeError) and not any(
+                    tok in low for tok in ("413", "request too large", "payload too large", "prompt size")
+                ):
+                    raise
+                log.info("analyze_payload_too_large_chunk_fallback", chars=len(doc_for_analysis))
+                condensed = await _condense_large_document(
+                    doc_for_analysis,
+                    session=session,
+                    settings=settings,
+                    chunk_chars=CHUNK_TARGET_CHARS,
+                )
+                result = await _call_json(_build_user(condensed[:SINGLE_SHOT_MAX_CHARS]))
+        else:
+            log.info("analyze_budget_chunk_reduce", est_tokens=est_tokens, chars=len(doc_for_analysis))
+            condensed = await _condense_large_document(
+                doc_for_analysis,
+                session=session,
+                settings=settings,
+                chunk_chars=CHUNK_TARGET_CHARS,
+            )
+            result = await _call_json(_build_user(condensed[:SINGLE_SHOT_MAX_CHARS]))
+    else:
+        try:
+            result = await _call_json(user)
+        except PayloadTooLargeError:
+            log.info("analyze_unexpected_413_chunk_fallback", chars=len(doc_for_analysis))
+            condensed = await _condense_large_document(
+                doc_for_analysis,
+                session=session,
+                settings=settings,
+                chunk_chars=CHUNK_TARGET_CHARS,
+            )
+            result = await _call_json(_build_user(condensed[:SINGLE_SHOT_MAX_CHARS]))
 
     log.info(
         "ai_analysis_done",

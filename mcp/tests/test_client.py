@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from chronicum_mcp.client import ChronicumApiError, ChronicumClient
+from chronicum_mcp.config import DEFAULT_API_URL, api_url, set_runtime_api_url
 from chronicum_mcp.format import project_material, search_payload
 from chronicum_mcp.http_auth import BearerAuthMiddleware
 
@@ -222,3 +223,27 @@ async def test_bearer_middleware_accepts():
     }
     await app(scope, receive, send)
     assert sent[0]["status"] == 204
+
+
+def test_api_url_defaults_and_overrides(monkeypatch):
+    monkeypatch.delenv("CHRONICUM_API_URL", raising=False)
+    monkeypatch.delenv("CHRONICUM_API_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    set_runtime_api_url(None)
+    try:
+        assert DEFAULT_API_URL == "http://127.0.0.1:8010"
+        assert api_url() == "http://127.0.0.1:8010"
+
+        monkeypatch.setenv("PORT", "8025")
+        assert api_url() == "http://127.0.0.1:8025"
+
+        monkeypatch.setenv("CHRONICUM_API_PORT", "8015")
+        assert api_url() == "http://127.0.0.1:8015"
+
+        set_runtime_api_url("http://127.0.0.1:8012/")
+        assert api_url() == "http://127.0.0.1:8012"
+
+        monkeypatch.setenv("CHRONICUM_API_URL", "http://127.0.0.1:9001/")
+        assert api_url() == "http://127.0.0.1:9001"
+    finally:
+        set_runtime_api_url(None)

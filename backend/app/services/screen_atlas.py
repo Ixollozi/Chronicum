@@ -53,6 +53,9 @@ def atlas_sampling(*, duration: float, source_type: str) -> tuple[float, int]:
         every = 8.0
         max_frames = 36
     if dur > 0:
+        # Spread grid evenly across full video when longer than max_frames * every
+        if max_frames > 0 and dur > every * max_frames:
+            every = round(dur / max_frames, 2)
         # Never sample more densely than needed for length
         est = int(dur / every) + 1
         if est < max_frames:

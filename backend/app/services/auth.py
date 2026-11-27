@@ -11,6 +11,7 @@ from uuid import uuid4
 import httpx
 import jwt
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -20,6 +21,7 @@ GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 PAT_PREFIX = "chr_"
+LAST_USED_TOUCH_INTERVAL = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -148,8 +150,25 @@ async def lookup_api_token(session: AsyncSession, raw: str) -> tuple[User, UserA
     if not row:
         return None
     token, user = row
-    token.last_used_at = datetime.now(timezone.utc)
-    await session.commit()
+    now = datetime.now(timezone.utc)
+    last_used = token.last_used_at
+    if last_used is not None and last_used.tzinfo is None:
+        last_used = last_used.replace(tzinfo=timezone.utc)
+    if last_used is None or (now - last_used) >= LAST_USED_TOUCH_INTERVAL:
+        token.last_used_at = now
+        try:
+            await session.commit()
+        except OperationalError:
+            await session.rollback()
+            refreshed = (
+                await session.execute(
+                    select(UserApiToken, User)
+                    .join(User, User.id == UserApiToken.user_id)
+                    .where(UserApiToken.token_hash == digest, UserApiToken.revoked_at.is_(None))
+                )
+            ).first()
+            if refreshed:
+                token, user = refreshed
     return user, token
 
 

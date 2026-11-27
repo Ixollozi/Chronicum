@@ -47,6 +47,8 @@ def trust_score(
     kinds = {str(s.get("kind") or "") for s in (evidence or [])}
     if "speech" in kinds:
         score += 0.08
+    elif "text" in kinds:
+        score += 0.08
     if "ocr" in kinds:
         score += 0.06
     if "speech" in kinds and "ocr" in kinds:

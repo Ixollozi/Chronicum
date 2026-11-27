@@ -4,6 +4,7 @@ import asyncio
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from functools import lru_cache
 from pathlib import Path
@@ -11,6 +12,15 @@ from pathlib import Path
 from app.logging_setup import get_logger
 
 log = get_logger(__name__)
+
+
+def win_no_window_kwargs() -> dict[str, int]:
+    """Suppress console window flashes for child processes (ffmpeg/ffprobe) on Windows."""
+    if sys.platform == "win32":
+        flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if flag:
+            return {"creationflags": flag}
+    return {}
 
 
 @lru_cache
@@ -43,7 +53,14 @@ def ffprobe_exe() -> str:
 async def run_cmd(args: list[str], timeout: int = 600) -> subprocess.CompletedProcess[str]:
     def _run() -> subprocess.CompletedProcess[str]:
         try:
-            return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+            return subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                **win_no_window_kwargs(),
+            )
         except FileNotFoundError as e:
             tool = args[0] if args else "cmd"
             return subprocess.CompletedProcess(args, 127, "", f"{tool} not found: {e}")

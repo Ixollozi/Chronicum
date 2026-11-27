@@ -139,3 +139,37 @@ async def test_build_screen_atlas_parallel_ocr_and_no_double_ocr(tmp_path: Path,
     assert len(scored_with_ocr_text) == ocr_calls
     assert all(txt and "Слайд" in txt for txt in scored_with_ocr_text)
     assert (atlas_dir / "atlas.json").is_file()
+
+
+def test_atlas_sampling_covers_full_long_video_duration():
+    every, max_frames = screen_atlas.atlas_sampling(duration=1800.0, source_type="youtube")
+    assert max_frames == 36
+    assert every * max_frames >= 1799.0
+    assert every >= 50.0
+
+    every_short, max_short = screen_atlas.atlas_sampling(duration=60.0, source_type="youtube")
+    assert every_short == 2.0
+    assert max_short <= 31
+
+
+@pytest.mark.asyncio
+async def test_run_cmd_sets_create_no_window_on_win32(monkeypatch):
+    import subprocess
+
+    captured: list[dict] = []
+
+    def fake_run(args, **kwargs):
+        captured.append(kwargs)
+        return subprocess.CompletedProcess(args, 0, "ok", "")
+
+    monkeypatch.setattr(media.subprocess, "run", fake_run)
+    monkeypatch.setattr(media.sys, "platform", "win32")
+    monkeypatch.setattr(media.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+    res = await media.run_cmd(["ffmpeg", "-version"], timeout=10)
+    assert res.returncode == 0
+    assert captured[-1].get("creationflags") == 0x08000000
+
+    monkeypatch.setattr(media.sys, "platform", "linux")
+    await media.run_cmd(["ffmpeg", "-version"], timeout=10)
+    assert "creationflags" not in captured[-1]

@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     google_embedding_model: str = "text-embedding-004"
     groq_vision_model: str = "meta-llama/llama-4-maverick-17b-128e-instruct"
     google_ai_api_key: str = ""
-    google_ai_model: str = "gemini-2.0-flash"
+    google_ai_model: str = "gemini-flash-lite-latest"
 
     video_preview_threshold_min: int = 10
     video_full_score_threshold: int = 6
@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     allow_admin_token: bool = False
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     web_origin: str = "http://127.0.0.1:3000"
+    chronicum_api_url: str = ""
+    chronicum_api_port: int | None = None
 
     google_client_id: str = ""
     google_client_secret: str = ""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 INSTAGRAM = re.compile(r"(instagram\.com|instagr\.am)", re.I)
 YOUTUBE = re.compile(r"(youtube\.com|youtu\.be)", re.I)
@@ -27,4 +28,7 @@ def classify_url(url: str) -> str:
             "Этот источник по ссылке пока не поддерживается. "
             "Скачай видео и загрузи файлом на /add или перешли в Telegram."
         )
+    path = (urlparse(u).path or "").lower()
+    if path.endswith(".pdf"):
+        return "pdf"
     return "article"

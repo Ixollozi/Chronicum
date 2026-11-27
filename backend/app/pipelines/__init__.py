@@ -9,7 +9,7 @@ from app.config import Settings, get_settings
 from app.logging_setup import get_logger
 from app.pipelines.article import extract_article
 from app.pipelines.image import extract_image_text
-from app.pipelines.pdf import extract_pdf_text
+from app.pipelines.pdf import download_pdf_url, extract_pdf_document, extract_pdf_text
 from app.pipelines.youtube import download_media_bundle, fetch_youtube_captions
 from app.services.media import (
     extract_audio,
@@ -307,11 +307,21 @@ async def extract_text_for_material(
         return text, title, None, 0.0, None
 
     if source_type == "pdf":
-        assert file_path
         await _progress("fetch")
-        text = await extract_pdf_text(file_path)
+        local_path = file_path
+        filename_hint = Path(file_path).name if file_path else None
+        if (not local_path or not Path(local_path).is_file()) and source_url:
+            from app.config import resolve_storage_root
+
+            local_path, filename_hint = await download_pdf_url(
+                source_url, resolve_storage_root(settings)
+            )
+        if not local_path:
+            raise ValueError("PDF material requires either a local file_path or a source_url")
+        pdf_res = await extract_pdf_document(local_path, settings=settings, session=session)
         await _progress("asr")
-        return text, Path(file_path).name, None, 0.0, file_path
+        best_title = pdf_res.title or filename_hint or Path(local_path).name
+        return pdf_res.text, best_title, None, 0.0, local_path
 
     if source_type == "image":
         assert file_path

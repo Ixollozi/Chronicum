@@ -13,11 +13,13 @@ def test_list_card_clips_summary():
             "category": "AI",
             "tags": ["llm"],
             "source_type": "note",
+            "created_at": "2026-11-27T12:52:17",
             "summary": "x" * 400,
         }
     )
     assert card["id"] == "abc"
     assert card["score"] == 8
+    assert card["created_at"] == "2026-11-27T12:52:17"
     assert card["summary"].endswith("…")
     assert len(card["summary"]) <= 280
 
@@ -46,20 +48,28 @@ def test_project_material_levels():
         "usefulness_score": 9,
         "processing_status": "done",
         "processing_stage": "full",
+        "created_at": "2026-11-27T12:52:17",
         "digest": "• a",
         "practical_takeaways": ["do x"],
         "raw_text": "SECRET RAW",
         "usage_tokens_in": 12,
     }
     summary = project_material(detail, "summary")
+    assert summary["created_at"] == "2026-11-27T12:52:17"
     assert "digest" not in summary
     assert "raw_text" not in summary
 
     card = project_material(detail, "card")
+    assert card["created_at"] == "2026-11-27T12:52:17"
     assert card["digest"] == "• a"
     assert "raw_text" not in card
 
+    teach = project_material(detail, "teach")
+    assert teach["created_at"] == "2026-11-27T12:52:17"
+    assert "raw_text" not in teach
+
     full = project_material(detail, "full")
+    assert full["created_at"] == "2026-11-27T12:52:17"
     assert full["raw_text"] == "SECRET RAW"
     assert "usage_tokens_in" not in full
 

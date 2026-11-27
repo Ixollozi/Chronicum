@@ -793,8 +793,10 @@ async def build_key_moments(
         return material
     if vpath and Path(vpath).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
         return material
+    meta_dirty = False
     if vpath and (not material.file_path or not Path(material.file_path).exists()):
         material.file_path = vpath
+        meta_dirty = True
 
     out_dir = _moments_dir(material.id)
     has_existing_images = _has_existing_moment_images(material, out_dir)
@@ -813,6 +815,10 @@ async def build_key_moments(
         if probed > 0 and (not duration or abs(duration - probed) > 1):
             duration = probed
             material.duration_seconds = duration
+            meta_dirty = True
+
+    if meta_dirty:
+        await session.commit()
 
     segments = await _ensure_timed_segments(material, vpath) if vpath else parse_timed_segments(material.raw_text)
     atlas_path = _atlas_dir(material.id)

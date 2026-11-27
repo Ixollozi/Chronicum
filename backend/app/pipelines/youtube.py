@@ -143,10 +143,21 @@ def parse_subtitle_payload(payload: str, fmt: str = "vtt") -> list[tuple[float, 
     return _parse_vtt_or_srt_captions(payload)
 
 
-def _match_track_key(tracks: dict, lang: str) -> str | None:
+def _match_track_key(tracks: dict, lang: str, *, prefer_orig: bool = False) -> str | None:
     if not tracks or not lang:
         return None
     lang_l = lang.lower()
+    if prefer_orig:
+        for key in tracks:
+            kl = key.lower()
+            if kl in (f"{lang_l}-orig", f"{lang_l}_orig"):
+                return key
+        for key in tracks:
+            kl = key.lower()
+            if (kl.startswith(f"{lang_l}-") or kl.startswith(f"{lang_l}_")) and (
+                kl.endswith("-orig") or kl.endswith("_orig")
+            ):
+                return key
     if lang in tracks:
         return lang
     for key in tracks:
@@ -197,7 +208,7 @@ def _candidate_caption_tracks(
         if not isinstance(bucket, dict):
             continue
         for lang in lang_order:
-            key = _match_track_key(bucket, lang)
+            key = _match_track_key(bucket, lang, prefer_orig=is_auto)
             if not key:
                 continue
             picked = _pick_track_format(bucket.get(key) or [])
