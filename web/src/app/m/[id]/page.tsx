@@ -819,7 +819,11 @@ export default function MaterialPage() {
         return (
           <div className="deck-slide-inner">
             <p className="deck-kicker">Полный текст</p>
-            <TranscriptView text={m.raw_text || ""} />
+            <TranscriptView
+              text={m.raw_text || ""}
+              durationSeconds={m.duration_seconds}
+              sourceType={m.source_type}
+            />
           </div>
         );
 
